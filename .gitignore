@@ -1,0 +1,5 @@
+/target
+pk-node
+pk-data
+*.exe
+.DS_Store

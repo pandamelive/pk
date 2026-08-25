@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PK · SPDE 主控</title>
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+  <aside class="rail">
+    <div class="brand">
+      <span class="mark">PK</span>
+      <div>
+        <strong>主控台</strong>
+        <small>SPDE control plane</small>
+      </div>
+    </div>
+    <nav>
+      <button class="nav on" data-view="dash">总览</button>
+      <button class="nav" data-view="nodes">节点</button>
+      <button class="nav" data-view="tasks">任务</button>
+      <button class="nav" data-view="runs">记录</button>
+      <button class="nav" data-view="ship">下发</button>
+    </nav>
+    <div class="rail-foot">
+      <label>API Token</label>
+      <input id="token" type="password" placeholder="可选 Bearer" autocomplete="off" />
+    </div>
+  </aside>
+
+  <main>
+    <header class="top">
+      <h1 id="title">总览</h1>
+      <div class="top-meta" id="clock"></div>
+    </header>
+
+    <section id="view-dash" class="view">
+      <div class="kpis" id="kpis"></div>
+      <div class="split">
+        <article class="panel">
+          <h2>在线节点</h2>
+          <div id="dash-nodes" class="list"></div>
+        </article>
+        <article class="panel">
+          <h2>最近运行</h2>
+          <div id="dash-runs" class="list"></div>
+        </article>
+      </div>
+    </section>
+
+    <section id="view-nodes" class="view hidden">
+      <div class="toolbar">
+        <button id="purge-offline" class="ghost">清理离线节点</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>状态</th><th>主机</th><th>平台</th><th>版本</th>
+              <th>活跃任务</th><th>累计流量</th><th>最后心跳</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="node-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-tasks" class="view hidden">
+      <article class="panel form-panel">
+        <h2>新建下载任务</h2>
+        <form id="task-form">
+          <div class="grid3">
+            <label>名称<input name="name" required placeholder="固件包 A" /></label>
+            <label>文件名<input name="filename" required placeholder="file.ipsw" /></label>
+            <label>调度
+              <select name="target">
+                <option value="any">任一空闲节点</option>
+                <option value="all">全部在线节点</option>
+                <option value="nodes">指定节点</option>
+              </select>
+            </label>
+          </div>
+          <label>URL<input name="url" required placeholder="https://..." /></label>
+          <label>指定节点 ID（逗号分隔，仅「指定节点」时有效）
+            <input name="node_ids" placeholder="uuid,uuid" />
+          </label>
+          <div class="row">
+            <label class="chk"><input type="checkbox" name="enable" checked /> 启用</label>
+            <label class="chk"><input type="checkbox" name="dispatch_now" checked /> 立即下发</label>
+            <button type="submit">创建任务</button>
+          </div>
+        </form>
+      </article>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>状态</th><th>名称</th><th>文件</th><th>目标</th><th>创建时间</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="task-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-runs" class="view hidden">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th><th>任务</th><th>节点</th><th>状态</th>
+              <th>大小</th><th>已下</th><th>耗时</th><th>速度</th>
+            </tr>
+          </thead>
+          <tbody id="run-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-ship" class="view hidden">
+      <article class="panel">
+        <h2>二进制下发</h2>
+        <p class="hint">把各平台 <code>spde</code> 放到 <code>pk-data/artifacts/</code> 后即可通过安装脚本或 API 拉取。</p>
+        <div id="arts" class="list"></div>
+      </article>
+      <article class="panel">
+        <h2>节点接入</h2>
+        <pre id="install-hint"></pre>
+      </article>
+    </section>
+  </main>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

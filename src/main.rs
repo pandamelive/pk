@@ -1,0 +1,78 @@
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use pk::{api, web, AppState, PkConfig};
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use tracing_subscriber::EnvFilter;
+
+#[derive(Debug, Parser)]
+#[command(name = "pk", version, about = "PK — SPDE 主控")]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// 启动主控 HTTP + Web UI
+    Serve {
+        /// 配置文件路径（默认：可执行文件同级 pk-node/config.yaml）
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// 覆盖监听地址
+        #[arg(long)]
+        listen: Option<String>,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    let cli = Cli::parse();
+    match cli.cmd {
+        Commands::Serve { config, listen } => run_serve(config, listen).await,
+    }
+}
+
+async fn run_serve(config: Option<PathBuf>, listen: Option<String>) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let exe_dir = exe
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let work_root = exe_dir.join("pk-node");
+    tokio::fs::create_dir_all(&work_root).await?;
+
+    let cfg_path = config.unwrap_or_else(|| work_root.join("config.yaml"));
+    let mut cfg = PkConfig::load_or_init(&cfg_path)?;
+    if let Some(l) = listen {
+        cfg.listen = l;
+    }
+
+    let state = AppState::open(cfg.clone(), work_root.clone()).await?;
+    tracing::info!("work root {:?}", work_root);
+    tracing::info!("data dir  {:?}", state.data_dir);
+
+    let app = api::router(state.clone());
+    let app = web::mount(app);
+
+    let addr: SocketAddr = cfg.listen.parse()?;
+    tracing::info!("PK listening on http://{addr}");
+    tracing::info!("Web UI: http://{addr}/");
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown())
+        .await?;
+    Ok(())
+}
+
+async fn shutdown() {
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("shutdown signal");
+}
