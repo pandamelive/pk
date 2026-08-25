@@ -37,6 +37,13 @@ body {
 }
 .brand strong { display: block; font-size: 15px; }
 .brand small { color: var(--muted); font-size: 11px; letter-spacing: 0.04em; }
+.ver { font-size: 11px; color: var(--accent); font-weight: 500; margin-left: 4px; }
+.adv { margin: 4px 0 10px; }
+.adv summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 6px 0; }
+.adv[open] summary { color: var(--ink); }
+.adv .grid3 { margin-top: 8px; }
+.chk-row { display: flex !important; align-items: center; gap: 6px; color: var(--ink) !important; }
+.chk-row input { width: auto; }
 nav { display: flex; flex-direction: column; gap: 6px; }
 .nav {
   background: transparent; border: 0; color: var(--muted);

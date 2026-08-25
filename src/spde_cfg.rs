@@ -61,14 +61,37 @@ direct_tasks:
         return yaml;
     }
     for nt in enabled {
-        yaml.push_str(&format!(
+        let mut task_yaml = format!(
             "  - name: {}\n    enable: true\n    url: {}\n    filename: {}\n    task_id: {}\n    dispatch_id: {}\n",
             yaml_quote(&nt.task.name),
             yaml_quote(&nt.task.url),
             yaml_quote(&nt.task.filename),
             nt.task.id,
             nt.dispatch_id,
-        ));
+        );
+        let o = &nt.task.overrides;
+        if let Some(v) = o.max_concurrent {
+            task_yaml.push_str(&format!("    max_concurrent: {}\n", v));
+        }
+        if let Some(v) = o.connections_per_file {
+            task_yaml.push_str(&format!("    connections_per_file: {}\n", v));
+        }
+        if let Some(v) = o.retry_times {
+            task_yaml.push_str(&format!("    retry_times: {}\n", v));
+        }
+        if let Some(v) = o.timeout {
+            task_yaml.push_str(&format!("    timeout: {}\n", v));
+        }
+        if let Some(v) = o.skip_tls_verify {
+            task_yaml.push_str(&format!("    skip_tls_verify: {}\n", v));
+        }
+        if let Some(v) = o.dry_run {
+            task_yaml.push_str(&format!("    dry_run: {}\n", v));
+        }
+        if let Some(ref v) = o.save_path {
+            task_yaml.push_str(&format!("    save_path: {}\n", yaml_quote(v)));
+        }
+        yaml.push_str(&task_yaml);
     }
     yaml
 }

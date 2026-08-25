@@ -11,7 +11,7 @@
     <div class="brand">
       <span class="mark">PK</span>
       <div>
-        <strong>主控台</strong>
+        <strong>主控台 <span id="pk-version" class="ver">v0.0.0</span></strong>
         <small>SPDE control plane</small>
       </div>
     </div>
@@ -84,6 +84,32 @@
           <label>指定节点 ID（逗号分隔，仅「指定节点」时有效）
             <input name="node_ids" placeholder="uuid,uuid" />
           </label>
+          <details class="adv">
+            <summary>高级参数</summary>
+            <div class="grid3">
+              <label>单文件并发连接数
+                <input type="number" name="connections_per_file" min="1" max="64" placeholder="默认 8" />
+              </label>
+              <label>重试次数
+                <input type="number" name="retry_times" min="0" max="20" placeholder="默认 3" />
+              </label>
+              <label>超时（秒）
+                <input type="number" name="timeout" min="10" placeholder="默认 1800" />
+              </label>
+              <label>最大并发（全局）
+                <input type="number" name="max_concurrent" min="1" max="64" placeholder="默认 4" />
+              </label>
+              <label>保存路径
+                <input name="save_path" placeholder="默认 ./download" />
+              </label>
+              <label class="chk-row">
+                <input type="checkbox" name="skip_tls_verify" /> 跳过 TLS 验证
+              </label>
+              <label class="chk-row">
+                <input type="checkbox" name="dry_run" /> 试运行（不实际写盘）
+              </label>
+            </div>
+          </details>
           <div class="row">
             <label class="chk"><input type="checkbox" name="enable" checked /> 启用</label>
             <label class="chk"><input type="checkbox" name="dispatch_now" checked /> 立即下发</label>

@@ -177,6 +177,7 @@ async fn create_task(
         status: TaskStatus::Draft,
         created_at: now,
         note: req.note,
+        overrides: req.overrides,
     };
     let dispatch_now = req.dispatch_now && req.enable;
     let out = s
@@ -203,6 +204,7 @@ pub struct PatchTaskReq {
     pub target: Option<AssignmentTarget>,
     pub node_ids: Option<Vec<Uuid>>,
     pub note: Option<String>,
+    pub overrides: Option<TaskOverrides>,
 }
 
 async fn patch_task(
@@ -234,6 +236,9 @@ async fn patch_task(
             if let Some(v) = req.note {
                 t.note = v;
             }
+            if let Some(o) = req.overrides {
+                t.overrides = o;
+            }
             Some(t.clone())
         })
         .await
@@ -244,13 +249,48 @@ async fn patch_task(
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "task not found"))
 }
 
-async fn delete_task(State(s): State<Arc<AppState>>, Path(id): Path<Uuid>) -> ApiResult<StatusCode> {
+#[derive(Debug, Deserialize)]
+struct DeleteTaskQuery {
+    #[serde(default)]
+    delete_file: bool,
+}
+
+async fn delete_task(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<DeleteTaskQuery>,
+) -> ApiResult<StatusCode> {
+    // 先拿到任务信息和相关节点，用于删文件通知
+    let (filename, save_path, node_ids) = {
+        let snap = s.snapshot().await;
+        let task = snap.tasks.iter().find(|t| t.id == id);
+        let fname = task.map(|t| t.filename.clone()).unwrap_or_default();
+        // 任务级 save_path 覆盖，否则用全局默认
+        let spath = task
+            .and_then(|t| t.overrides.save_path.clone())
+            .unwrap_or_else(|| s.cfg.spde_defaults.save_path.clone());
+        let nids: Vec<Uuid> = snap
+            .dispatches
+            .iter()
+            .filter(|d| d.task_id == id)
+            .map(|d| d.node_id)
+            .collect();
+        (fname, spath, nids)
+    };
+
     s.with_mut(|snap| {
         scheduler::cancel_task(snap, id);
         snap.tasks.retain(|t| t.id != id);
     })
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // 如果要求删除文件，通知所有相关节点
+    if q.delete_file && !filename.is_empty() {
+        for nid in &node_ids {
+            ws::notify_delete_file(&s, *nid, &filename, &save_path).await;
+        }
+    }
 
     ws::notify_config_changed(&s).await;
     Ok(StatusCode::NO_CONTENT)

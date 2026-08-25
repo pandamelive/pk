@@ -248,6 +248,7 @@ pub fn overview(snap: &Snapshot) -> Overview {
         .sum();
     let speed_n = snap.runs.iter().filter(|r| r.avg_speed_mbps > 0.0).count();
     Overview {
+        version: env!("CARGO_PKG_VERSION").to_string(),
         nodes_total: snap.nodes.len(),
         nodes_online,
         nodes_offline: snap.nodes.len().saturating_sub(nodes_online),

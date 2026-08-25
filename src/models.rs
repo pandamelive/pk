@@ -48,6 +48,24 @@ pub struct Node {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaskOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections_per_file: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_times: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_tls_verify: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: Uuid,
@@ -60,6 +78,8 @@ pub struct Task {
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
     pub note: String,
+    #[serde(default)]
+    pub overrides: TaskOverrides,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -185,6 +205,8 @@ pub struct CreateTaskReq {
     /// 创建后立即调度下发
     #[serde(default = "default_true")]
     pub dispatch_now: bool,
+    #[serde(default)]
+    pub overrides: TaskOverrides,
 }
 
 fn default_true() -> bool {
@@ -199,6 +221,7 @@ impl Default for AssignmentTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Overview {
+    pub version: String,
     pub nodes_total: usize,
     pub nodes_online: usize,
     pub nodes_offline: usize,

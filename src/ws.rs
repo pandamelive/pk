@@ -22,6 +22,12 @@ pub enum ServerMsg {
     ConfigChanged,
     /// 保活心跳
     Ping,
+    /// 删除本地已下载文件
+    DeleteFile {
+        filename: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        save_path: Option<String>,
+    },
 }
 
 /// SPDE → PK
@@ -99,6 +105,16 @@ impl WsManager {
     pub async fn broadcast_all(&self, msg: Message) {
         let g = self.inner.read().await;
         for senders in g.values() {
+            for tx in senders {
+                let _ = tx.send(msg.clone()).await;
+            }
+        }
+    }
+
+    /// 向指定节点发送消息
+    pub async fn send_to_node(&self, node_id: Uuid, msg: Message) {
+        let g = self.inner.read().await;
+        if let Some(senders) = g.get(&node_id) {
             for tx in senders {
                 let _ = tx.send(msg.clone()).await;
             }
@@ -258,5 +274,25 @@ pub async fn notify_config_changed(state: &Arc<AppState>) {
     state
         .ws_mgr
         .broadcast_all(Message::Text(msg.into()))
+        .await;
+}
+
+/// 通知指定节点删除本地下载文件
+pub async fn notify_delete_file(
+    state: &Arc<AppState>,
+    node_id: Uuid,
+    filename: &str,
+    save_path: &str,
+) {
+    let msg = match serde_json::to_string(&ServerMsg::DeleteFile {
+        filename: filename.to_string(),
+        save_path: Some(save_path.to_string()),
+    }) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    state
+        .ws_mgr
+        .send_to_node(node_id, Message::Text(msg.into()))
         .await;
 }

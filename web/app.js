@@ -60,6 +60,7 @@ $$(".nav").forEach((b) => {
 });
 
 function renderKpis(o) {
+  if (o.version) $("#pk-version").textContent = "v" + o.version;
   const items = [
     ["在线节点", `${o.nodes_online} / ${o.nodes_total}`],
     ["运行中任务", String(o.tasks_running)],
@@ -153,7 +154,12 @@ document.addEventListener("click", async (e) => {
     if (t.dataset.delNode) {
       await api(`/api/v1/nodes/${t.dataset.delNode}`, { method: "DELETE" });
     } else if (t.dataset.delTask) {
-      await api(`/api/v1/tasks/${t.dataset.delTask}`, { method: "DELETE" });
+      const taskName = t.closest("tr")?.querySelector("td:nth-child(2)")?.textContent?.trim() || "该任务";
+      const delFile = confirm(`删除任务「${taskName}」？\n\n点击「确定」同时删除已下载的文件，点击「取消」仅删除任务记录。`);
+      const url = delFile
+        ? `/api/v1/tasks/${t.dataset.delTask}?delete_file=true`
+        : `/api/v1/tasks/${t.dataset.delTask}`;
+      await api(url, { method: "DELETE" });
     } else if (t.dataset.dispatch) {
       await api(`/api/v1/tasks/${t.dataset.dispatch}/dispatch`, { method: "POST" });
     } else if (t.dataset.cancel) {
@@ -177,6 +183,21 @@ $("#task-form").addEventListener("submit", async (e) => {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+
+  // 构建任务级参数覆盖（只填了的才传）
+  const overrides = {};
+  const num = (k) => {
+    const v = fd.get(k);
+    return v !== null && v.toString().trim() !== "" ? Number(v) : undefined;
+  };
+  const mc = num("max_concurrent"); if (mc !== undefined) overrides.max_concurrent = mc;
+  const cpf = num("connections_per_file"); if (cpf !== undefined) overrides.connections_per_file = cpf;
+  const rt = num("retry_times"); if (rt !== undefined) overrides.retry_times = rt;
+  const to = num("timeout"); if (to !== undefined) overrides.timeout = to;
+  const sp = fd.get("save_path")?.toString().trim(); if (sp) overrides.save_path = sp;
+  if (fd.get("skip_tls_verify") === "on") overrides.skip_tls_verify = true;
+  if (fd.get("dry_run") === "on") overrides.dry_run = true;
+
   try {
     await api("/api/v1/tasks", {
       method: "POST",
@@ -189,6 +210,7 @@ $("#task-form").addEventListener("submit", async (e) => {
         target: fd.get("target"),
         node_ids,
         note: "",
+        overrides,
       },
     });
     e.target.reset();
