@@ -17,10 +17,10 @@ cargo build --release
 
 浏览器打开 `http://127.0.0.1:5566`。
 
-工作目录在二进制同级的 `pk-node/`：
+工作目录在二进制同级的 `pk-controlcenter/`：
 
 ```
-pk-node/
+pk-controlcenter/
 ├── config.yaml          # 主控配置
 └── pk-data/
     ├── state.json       # 节点 / 任务 / 调度 / 运行记录

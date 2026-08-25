@@ -16,7 +16,7 @@ struct Cli {
 enum Commands {
     /// 启动主控 HTTP + Web UI
     Serve {
-        /// 配置文件路径（默认：可执行文件同级 pk-node/config.yaml）
+        /// 配置文件路径（默认：可执行文件同级 pk-controlcenter/config.yaml）
         #[arg(long)]
         config: Option<PathBuf>,
         /// 覆盖监听地址
@@ -45,7 +45,7 @@ async fn run_serve(config: Option<PathBuf>, listen: Option<String>) -> Result<()
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let work_root = exe_dir.join("pk-node");
+    let work_root = exe_dir.join("pk-controlcenter");
     tokio::fs::create_dir_all(&work_root).await?;
 
     let cfg_path = config.unwrap_or_else(|| work_root.join("config.yaml"));
