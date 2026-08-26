@@ -60,6 +60,9 @@ impl AppState {
             std::fs::rename(&json_path, &bak).ok();
         }
 
+        // 首次启动：tasks 表为空时预置默认任务
+        seed_default_tasks(&conn)?;
+
         Ok(Arc::new(Self {
             cfg,
             work_root,
@@ -216,6 +219,43 @@ fn create_tables(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_wfr_workflow ON workflow_runs(workflow_id);
         "#,
     )?;
+    Ok(())
+}
+
+// ── 首次启动预置默认任务 ──────────────────────────────────
+
+fn seed_default_tasks(conn: &Connection) -> Result<()> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
+    if count > 0 {
+        return Ok(());
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let defaults = [
+        (
+            "iPhone 4.7 12.1.4 固件",
+            "http://updates-http.cdn-apple.com/2019WinterFCS/fullrestores/041-39257/32129B6C-292C-11E9-9E72-4511412B0A59/iPhone_4.7_12.1.4_16D57_Restore.ipsw",
+            "iPhone_4.7_12.1.4_16D57_Restore.ipsw",
+        ),
+        (
+            "iPhone 4S iOS 9.3.5 固件",
+            "http://appldnld.apple.com/iOS9.3.5/031-73068-20160825-6A2B99DE-6711-11E6-BB8F-133834D2D062/iPhone4,1_9.3.5_13G36_Restore.ipsw",
+            "iPhone4,1_9.3.5_13G36_Restore.ipsw",
+        ),
+        (
+            "iPhone iOS 15.3 固件",
+            "https://updates.cdn-apple.com/2022FCSWinter/fullrestores/002-57695/F64E2C74-C18B-48B3-8BC2-FF0DB4E21301/iPhone11,2,iPhone11,4,iPhone11,6,iPhone12,3,iPhone12,5_15.3_19D50_Restore.ipsw",
+            "iPhone11,2,iPhone11,4,iPhone11,6,iPhone12,3,iPhone12,5_15.3_19D50_Restore.ipsw",
+        ),
+    ];
+
+    for (name, url, filename) in defaults {
+        conn.execute(
+            "INSERT INTO tasks (id, name, url, filename, enable, created_at, note, overrides) VALUES (?1, ?2, ?3, ?4, 1, ?5, '', '{}')",
+            params![uuid::Uuid::new_v4().to_string(), name, url, filename, now],
+        )?;
+    }
+    tracing::info!("首次启动：已预置 {} 个默认下载任务", defaults.len());
     Ok(())
 }
 
