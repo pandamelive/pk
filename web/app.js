@@ -7,6 +7,7 @@ let currentWorkflowId = null;
 let cachedTasks = [];
 let cachedNodes = [];
 let cachedWorkflows = [];
+let cachedDispatches = [];
 
 async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json" };
@@ -261,6 +262,81 @@ function renderArtifacts(arts) {
   ).join("");
 }
 
+// ==================== 执行（待下发池 + 执行中） ====================
+function renderExecution(dispatches, tasks, nodes) {
+  const taskMap = new Map(tasks.map((t) => [t.id, t]));
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+
+  const pending = dispatches.filter((d) => d.state === "pending" && !d.node_id);
+  const running = dispatches.filter((d) => d.state === "running");
+  const done = dispatches.filter((d) => d.state === "success" || d.state === "failed");
+
+  // KPI
+  $("#exec-kpis").innerHTML = [
+    ["任务总数", String(dispatches.length)],
+    ["待下发", String(pending.length)],
+    ["执行中", String(running.length)],
+    ["已完成", String(done.length)],
+    ["成功", String(dispatches.filter((d) => d.state === "success").length)],
+    ["失败", String(dispatches.filter((d) => d.state === "failed").length)],
+  ].map(([k, v]) => `<div class="kpi"><span>${k}</span><b>${v}</b></div>`).join("");
+
+  $("#exec-pending-count").textContent = pending.length;
+  $("#exec-running-count").textContent = running.length;
+  $("#exec-done-count").textContent = done.length;
+
+  // 待下发列表
+  $("#exec-pending-body").innerHTML = pending
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+    .map((d) => {
+      const t = taskMap.get(d.task_id);
+      const targetLabel = d.target === "nodes" ? `指定节点(${d.allowed_nodes?.length || 0})` : d.target === "all" ? "全部在线" : "任一空闲";
+      return `<tr>
+        <td>${t ? t.name : "未知任务"}<div class="mono">${t ? t.url.substring(0, 50) : d.task_id}</div></td>
+        <td>${t ? t.filename : "-"}</td>
+        <td>${fmtTime(d.created_at)}</td>
+        <td>${pill(targetLabel)}</td>
+      </tr>`;
+    })
+    .join("") || `<tr><td colspan="4" class="hint">待下发池为空</td></tr>`;
+
+  // 执行中列表
+  const now = Date.now();
+  $("#exec-running-body").innerHTML = running
+    .sort((a, b) => new Date(a.claimed_at || a.updated_at) - new Date(b.claimed_at || b.updated_at))
+    .map((d) => {
+      const t = taskMap.get(d.task_id);
+      const n = d.node_id ? nodeMap.get(d.node_id) : null;
+      const claimed = d.claimed_at ? new Date(d.claimed_at) : null;
+      const elapsed = claimed ? Math.floor((now - claimed.getTime()) / 1000) : 0;
+      const elapsedStr = elapsed > 60 ? `${Math.floor(elapsed / 60)}分${elapsed % 60}秒` : `${elapsed}秒`;
+      return `<tr>
+        <td>${t ? t.name : "未知任务"}<div class="mono">${t ? t.filename : d.task_id}</div></td>
+        <td>${n ? `${n.hostname}<div class="mono">${n.platform}</div>` : `<span class="mono">${d.node_id || "-"}</span>`}</td>
+        <td>${d.claimed_at ? fmtTime(d.claimed_at) : "-"}</td>
+        <td>${elapsedStr}</td>
+      </tr>`;
+    })
+    .join("") || `<tr><td colspan="4" class="hint">暂无执行中任务</td></tr>`;
+
+  // 最近完成列表
+  $("#exec-done-body").innerHTML = done
+    .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+    .slice(0, 50)
+    .map((d) => {
+      const t = taskMap.get(d.task_id);
+      const n = d.node_id ? nodeMap.get(d.node_id) : null;
+      return `<tr>
+        <td>${pill(d.state)}</td>
+        <td>${t ? t.name : "未知任务"}<div class="mono">${t ? t.filename : d.task_id}</div></td>
+        <td>${n ? n.hostname : `<span class="mono">${d.node_id || "-"}</span>`}</td>
+        <td>${fmtTime(d.updated_at)}</td>
+        <td>${d.claimed_at ? fmtTime(d.claimed_at) : "-"}</td>
+      </tr>`;
+    })
+    .join("") || `<tr><td colspan="5" class="hint">暂无完成记录</td></tr>`;
+}
+
 // ==================== 导航 ====================
 function switchView(view) {
   currentView = view;
@@ -268,7 +344,7 @@ function switchView(view) {
   const el = $(`#view-${view}`);
   if (el) el.classList.remove("hidden");
   $$(".nav").forEach((b) => b.classList.toggle("on", b.dataset.view === view));
-  const titles = { dash: "总览", nodes: "节点", tasks: "任务", workflows: "调度", "workflow-detail": "工作流详情", runs: "记录", ship: "下发" };
+  const titles = { dash: "总览", nodes: "节点", tasks: "任务", workflows: "调度", execution: "执行", "workflow-detail": "工作流详情", runs: "记录", ship: "部署hub" };
   $("#title").textContent = titles[view] || view;
 }
 
@@ -276,7 +352,7 @@ function switchView(view) {
 async function refresh() {
   $("#clock").textContent = new Date().toLocaleString();
   try {
-    const [ov, nodes, tasks, runs, arts, defaults, workflows] = await Promise.all([
+    const [ov, nodes, tasks, runs, arts, defaults, workflows, dispatches] = await Promise.all([
       api("/api/v1/overview"),
       api("/api/v1/nodes"),
       api("/api/v1/tasks"),
@@ -284,10 +360,12 @@ async function refresh() {
       api("/api/v1/artifacts"),
       api("/api/v1/defaults").catch(() => null),
       api("/api/v1/workflows").catch(() => []),
+      api("/api/v1/dispatches").catch(() => []),
     ]);
     cachedTasks = tasks;
     cachedNodes = nodes;
     cachedWorkflows = workflows;
+    cachedDispatches = dispatches;
     if (defaults) applyDefaults(defaults);
     renderKpis(ov);
     $("#dash-nodes").innerHTML = (nodes.slice(0, 8).map((n) =>
@@ -301,6 +379,7 @@ async function refresh() {
     renderWorkflows(workflows);
     renderRuns(runs);
     renderArtifacts(arts);
+    renderExecution(dispatches, tasks, nodes);
     renderTaskPicker(tasks);
     renderNodePicker(nodes);
     // 如果当前在工作流详情页，刷新详情

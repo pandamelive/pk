@@ -1,5 +1,5 @@
 use crate::models::*;
-use crate::scheduler::execute_workflow;
+use crate::scheduler::{self, execute_workflow};
 use crate::store::AppState;
 use crate::ws;
 use anyhow::Result;
@@ -10,14 +10,32 @@ use std::sync::Arc;
 use tokio::time::{self, Duration as TokioDuration};
 use uuid::Uuid;
 
-/// 启动后台工作流调度器，每 30 秒扫描一次
+/// 启动后台工作流调度器，每 30 秒扫描一次；同时启动超时回收任务
 pub async fn start(state: Arc<AppState>) {
+    // 工作流定时触发
+    let state_clone = state.clone();
     tokio::spawn(async move {
         let mut interval = time::interval(TokioDuration::from_secs(30));
         loop {
             interval.tick().await;
-            if let Err(e) = scan_and_trigger(&state).await {
+            if let Err(e) = scan_and_trigger(&state_clone).await {
                 tracing::warn!("workflow scheduler error: {}", e);
+            }
+        }
+    });
+
+    // 超时回收：Running 任务节点超时未上报则回收到待下发池
+    tokio::spawn(async move {
+        let mut interval = time::interval(TokioDuration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(e) = state
+                .with_mut(|snap| {
+                    scheduler::reclaim_timeout_tasks(snap, 180); // 3分钟超时回收
+                })
+                .await
+            {
+                tracing::warn!("reclaim timeout tasks error: {}", e);
             }
         }
     });
@@ -95,8 +113,8 @@ pub async fn trigger_workflow(state: &Arc<AppState>, wf_id: Uuid) -> Result<Opti
         })
         .await?;
 
-    // 通知所有节点 config 已变更，让节点重新拉取任务列表
-    ws::notify_config_changed(state).await;
+    // 通知所有节点：共享待下发池有新任务，空闲节点去 claim 领取
+    ws::notify_new_task(state).await;
 
     Ok(Some(run))
 }

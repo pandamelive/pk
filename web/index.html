@@ -20,8 +20,9 @@
       <button class="nav" data-view="nodes">节点</button>
       <button class="nav" data-view="tasks">任务</button>
       <button class="nav" data-view="workflows">调度</button>
+      <button class="nav" data-view="execution">执行</button>
       <button class="nav" data-view="runs">记录</button>
-      <button class="nav" data-view="ship">下发</button>
+      <button class="nav" data-view="ship">部署hub</button>
     </nav>
     <div class="rail-foot">
       <label>API Token</label>
@@ -252,6 +253,48 @@
           </div>
         </article>
       </div>
+    </section>
+
+    <!-- ==================== 执行（待下发池 + 执行中） ==================== -->
+    <section id="view-execution" class="view hidden">
+      <div class="kpis" id="exec-kpis"></div>
+      <div class="split">
+        <article class="panel">
+          <h2>待下发池 <span id="exec-pending-count" class="pill">0</span></h2>
+          <p class="hint">共享待下发任务，空闲节点自动领取</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>任务名称</th><th>文件名</th><th>创建时间</th><th>领取策略</th></tr>
+              </thead>
+              <tbody id="exec-pending-body"></tbody>
+            </table>
+          </div>
+        </article>
+        <article class="panel">
+          <h2>执行中 <span id="exec-running-count" class="pill">0</span></h2>
+          <p class="hint">节点正在执行的任务，含领取时间和执行节点</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>任务名称</th><th>执行节点</th><th>领取时间</th><th>已执行</th></tr>
+              </thead>
+              <tbody id="exec-running-body"></tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+      <article class="panel">
+        <h2>最近完成 <span id="exec-done-count" class="pill">0</span></h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>状态</th><th>任务名称</th><th>执行节点</th><th>完成时间</th><th>领取时间</th></tr>
+            </thead>
+            <tbody id="exec-done-body"></tbody>
+          </table>
+        </div>
+      </article>
     </section>
 
     <!-- ==================== 记录 ==================== -->

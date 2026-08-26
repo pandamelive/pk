@@ -42,6 +42,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/agent/register", post(agent_register))
         .route("/agent/heartbeat", post(agent_heartbeat))
         .route("/agent/report", post(agent_report))
+        .route("/agent/claim", post(agent_claim))
         .route("/agent/ws", get(ws::agent_ws))
         .route("/agent/{id}/ack/{dispatch_id}", post(agent_ack_running));
 
@@ -262,7 +263,7 @@ async fn delete_task(
             .dispatches
             .iter()
             .filter(|d| d.task_id == id)
-            .map(|d| d.node_id)
+            .filter_map(|d| d.node_id)
             .collect();
         (fname, spath, nids)
     };
@@ -417,7 +418,7 @@ async fn trigger_workflow(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "workflow not found"))?;
 
-    ws::notify_config_changed(&s).await;
+    ws::notify_new_task(&s).await;
     Ok(Json(run))
 }
 
@@ -669,6 +670,34 @@ async fn agent_report(
 
     ws::notify_config_changed(&s).await;
     Ok(Json(rec))
+}
+
+/// 节点从共享待下发池领取一个任务
+/// 领到任务返回 200 + 任务详情，池子空返回 204
+async fn agent_claim(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<AgentClaimReq>,
+) -> ApiResult<Response> {
+    let result = s
+        .with_mut(|snap| scheduler::claim_task(snap, req.node_id))
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match result {
+        Some(nt) => {
+            eprintln!("[claim] node {} got task {} ({})", req.node_id, nt.task.name, nt.dispatch_id);
+            Ok(Json(AgentClaimResp {
+                dispatch_id: nt.dispatch_id,
+                task_id: nt.task.id,
+                name: nt.task.name,
+                url: nt.task.url,
+                filename: nt.task.filename,
+                overrides: nt.task.overrides,
+            })
+            .into_response())
+        }
+        None => Ok(StatusCode::NO_CONTENT.into_response()),
+    }
 }
 
 async fn agent_ack_running(

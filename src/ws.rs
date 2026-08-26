@@ -20,6 +20,8 @@ use uuid::Uuid;
 pub enum ServerMsg {
     /// 配置可能变化，SPDE 应重新拉取 config.yaml
     ConfigChanged,
+    /// 共享待下发池有新任务，空闲节点应调用 /agent/claim 领取
+    NewTask,
     /// 保活心跳
     Ping,
     /// 删除本地已下载文件
@@ -268,6 +270,18 @@ async fn handle_client_msg(state: &Arc<AppState>, node_id: Uuid, msg: ClientMsg)
 /// 任务/配置变更后调用：通知所有在线 WebSocket 节点重新拉取 config
 pub async fn notify_config_changed(state: &Arc<AppState>) {
     let msg = match serde_json::to_string(&ServerMsg::ConfigChanged) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    state
+        .ws_mgr
+        .broadcast_all(Message::Text(msg.into()))
+        .await;
+}
+
+/// 共享待下发池有新任务时调用：通知所有在线节点去 claim 领取
+pub async fn notify_new_task(state: &Arc<AppState>) {
+    let msg = match serde_json::to_string(&ServerMsg::NewTask) {
         Ok(s) => s,
         Err(_) => return,
     };

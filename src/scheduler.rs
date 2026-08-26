@@ -2,84 +2,51 @@ use crate::models::*;
 use chrono::Utc;
 use uuid::Uuid;
 
-/// 分配给某节点的任务（含 dispatch_id，用于生成 config 和回报告）
+/// 分配给某节点的任务（含 dispatch_id，用于回报告）
 #[derive(Debug, Clone)]
 pub struct NodeTask {
     pub dispatch_id: Uuid,
     pub task: Task,
 }
 
-/// 按指定目标把任务下发到节点，写入 pending dispatch（已有未完成的不重复发）。
-pub fn dispatch_task_to(
+/// 创建一条待下发 dispatch（进入共享待下发池，不绑定节点）
+pub fn create_pending_dispatch(
     snap: &mut Snapshot,
     task_id: Uuid,
     target: &AssignmentTarget,
-    node_ids: &[Uuid],
-) -> usize {
+    allowed_nodes: &[Uuid],
+) -> bool {
     let Some(task) = snap.tasks.iter().find(|t| t.id == task_id).cloned() else {
-        return 0;
+        return false;
     };
     if !task.enable {
-        return 0;
+        return false;
     }
-
-    let online: Vec<Uuid> = snap
-        .nodes
-        .iter()
-        .filter(|n| n.status != NodeStatus::Offline)
-        .map(|n| n.id)
-        .collect();
-
-    let targets: Vec<Uuid> = match target {
-        AssignmentTarget::All => online,
-        AssignmentTarget::Nodes => node_ids
-            .iter()
-            .copied()
-            .filter(|id| online.contains(id))
-            .collect(),
-        AssignmentTarget::Any => pick_least_loaded(snap, &online).into_iter().collect(),
-    };
-
-    let mut created = 0usize;
     let now = Utc::now();
-    for node_id in targets {
-        let exists = snap.dispatches.iter().any(|d| {
-            d.task_id == task_id
-                && d.node_id == node_id
-                && matches!(
-                    d.state,
-                    DispatchState::Pending | DispatchState::Acked | DispatchState::Running
-                )
-        });
-        if exists {
-            continue;
-        }
-        snap.dispatches.push(Dispatch {
-            id: Uuid::new_v4(),
-            task_id,
-            node_id,
-            state: DispatchState::Pending,
-            created_at: now,
-            updated_at: now,
-        });
-        created += 1;
-    }
-    created
+    snap.dispatches.push(Dispatch {
+        id: Uuid::new_v4(),
+        task_id,
+        node_id: None,
+        state: DispatchState::Pending,
+        created_at: now,
+        updated_at: now,
+        claimed_at: None,
+        target: target.clone(),
+        allowed_nodes: allowed_nodes.to_vec(),
+    });
+    true
 }
 
-/// 执行工作流：按 task_ids 次序依次下发每个任务，返回运行记录
+/// 执行工作流：每个任务创建一条待下发 dispatch 进入共享池
 pub fn execute_workflow(snap: &mut Snapshot, wf: &Workflow) -> WorkflowRun {
     let now = Utc::now();
     let mut dispatch_ids = Vec::new();
     let mut task_count = 0u32;
 
-    // 先清理这些任务之前卡住的 Pending/Acked dispatch（避免旧触发阻塞新触发）
-    // Running 状态的不取消，避免中断正在下载的任务
+    // 清理这些任务之前卡住的 Pending dispatch（避免旧触发阻塞新触发）
     for &task_id in &wf.task_ids {
         for d in snap.dispatches.iter_mut() {
-            if d.task_id == task_id
-                && matches!(d.state, DispatchState::Pending | DispatchState::Acked)
-            {
+            if d.task_id == task_id && d.state == DispatchState::Pending {
                 d.state = DispatchState::Cancelled;
                 d.updated_at = now;
             }
@@ -87,11 +54,9 @@ pub fn execute_workflow(snap: &mut Snapshot, wf: &Workflow) -> WorkflowRun {
     }
 
     for &task_id in &wf.task_ids {
-        let before = snap.dispatches.len();
-        let n = dispatch_task_to(snap, task_id, &wf.target, &wf.node_ids);
-        if n > 0 {
+        if create_pending_dispatch(snap, task_id, &wf.target, &wf.node_ids) {
             task_count += 1;
-            for d in &snap.dispatches[before..] {
+            if let Some(d) = snap.dispatches.last() {
                 dispatch_ids.push(d.id);
             }
         }
@@ -108,50 +73,93 @@ pub fn execute_workflow(snap: &mut Snapshot, wf: &Workflow) -> WorkflowRun {
         failed_count: 0,
         dispatch_ids,
         error_msg: if task_count == 0 {
-            Some("没有可用节点或任务全部禁用".into())
+            Some("任务全部禁用或不存在".into())
         } else {
             None
         },
     }
 }
 
-fn pick_least_loaded(snap: &Snapshot, online: &[Uuid]) -> Option<Uuid> {
-    online
+/// 节点从共享待下发池领取一个任务（原子操作，单进程天然串行）
+/// 返回领到的任务详情，池子空或无权限则返回 None
+pub fn claim_task(snap: &mut Snapshot, node_id: Uuid) -> Option<NodeTask> {
+    // 节点必须在线
+    let node_online = snap
+        .nodes
         .iter()
-        .copied()
-        .min_by_key(|id| {
-            let pending = snap
-                .dispatches
-                .iter()
-                .filter(|d| {
-                    d.node_id == *id
-                        && matches!(
-                            d.state,
-                            DispatchState::Pending | DispatchState::Acked | DispatchState::Running
-                        )
-                })
-                .count();
-            let node_active = snap
-                .nodes
-                .iter()
-                .find(|n| n.id == *id)
-                .map(|n| n.active_tasks)
-                .unwrap_or(0);
-            (pending as u32).saturating_add(node_active)
-        })
+        .any(|n| n.id == node_id && n.status != NodeStatus::Offline);
+    if !node_online {
+        return None;
+    }
+
+    let now = Utc::now();
+    // 找到最早的 Pending 且该节点有权限领取的 dispatch
+    let idx = snap.dispatches.iter().position(|d| {
+        if d.state != DispatchState::Pending || d.node_id.is_some() {
+            return false;
+        }
+        match d.target {
+            AssignmentTarget::Any | AssignmentTarget::All => true,
+            AssignmentTarget::Nodes => d.allowed_nodes.contains(&node_id),
+        }
+    })?;
+
+    let d = &mut snap.dispatches[idx];
+    d.node_id = Some(node_id);
+    d.state = DispatchState::Running;
+    d.claimed_at = Some(now);
+    d.updated_at = now;
+    let dispatch_id = d.id;
+
+    let task = snap
+        .tasks
+        .iter()
+        .find(|t| t.id == d.task_id && t.enable)?
+        .clone();
+
+    Some(NodeTask {
+        dispatch_id,
+        task,
+    })
 }
 
-/// 取出该节点当前应执行的任务列表（基于 active dispatch 过滤）。
+/// 超时回收：Running 状态的 dispatch 如果节点超时未上报，回收到待下发池
+/// timeout_secs: 领取后超过此秒数未完成则判定超时
+pub fn reclaim_timeout_tasks(snap: &mut Snapshot, timeout_secs: i64) {
+    let now = Utc::now();
+    for d in snap.dispatches.iter_mut() {
+        if d.state != DispatchState::Running {
+            continue;
+        }
+        let Some(claimed_at) = d.claimed_at else {
+            continue;
+        };
+        let elapsed = (now - claimed_at).num_seconds();
+        if elapsed <= timeout_secs {
+            continue;
+        }
+        // 检查节点是否还在线
+        let node_offline = d
+            .node_id
+            .and_then(|nid| snap.nodes.iter().find(|n| n.id == nid))
+            .map(|n| n.status == NodeStatus::Offline)
+            .unwrap_or(true);
+        // 节点离线 或 超时过久（2倍超时），回收到待下发池
+        if node_offline || elapsed > timeout_secs * 2 {
+            d.state = DispatchState::Pending;
+            d.node_id = None;
+            d.claimed_at = None;
+            d.updated_at = now;
+        }
+    }
+}
+
+/// 取出该节点当前正在执行的任务（用于节点重启后恢复，只返回 Running）
 pub fn active_tasks_for_node(snap: &Snapshot, node_id: Uuid) -> Vec<NodeTask> {
     snap.dispatches
         .iter()
-        .filter(|d| d.node_id == node_id)
-        .filter(|d| {
-            matches!(
-                d.state,
-                DispatchState::Pending | DispatchState::Acked | DispatchState::Running
-            )
-        })
+        .filter(|d| d.node_id == Some(node_id))
+        .filter(|d| d.state == DispatchState::Running)
         .filter_map(|d| {
             let task = snap
                 .tasks
@@ -284,10 +292,11 @@ pub fn overview(snap: &Snapshot) -> Overview {
         tasks_running,
         workflows_total: snap.workflows.len(),
         workflows_active: snap.workflows.iter().filter(|w| w.enable).count(),
+        // 待下发 = 共享池中未被领取的 Pending dispatch
         dispatches_pending: snap
             .dispatches
             .iter()
-            .filter(|d| d.state == DispatchState::Pending)
+            .filter(|d| d.state == DispatchState::Pending && d.node_id.is_none())
             .count(),
         bytes_downloaded,
         runs_success,

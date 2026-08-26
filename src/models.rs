@@ -149,10 +149,21 @@ pub enum DispatchState {
 pub struct Dispatch {
     pub id: Uuid,
     pub task_id: Uuid,
-    pub node_id: Uuid,
+    /// Pending 时为 None（共享待下发池），节点领取后绑定
+    #[serde(default)]
+    pub node_id: Option<Uuid>,
     pub state: DispatchState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// 领取时间，用于超时回收判断
+    #[serde(default)]
+    pub claimed_at: Option<DateTime<Utc>>,
+    /// 领取权限控制（any/all=任意节点，nodes=仅白名单）
+    #[serde(default)]
+    pub target: AssignmentTarget,
+    /// target=nodes 时的允许节点列表
+    #[serde(default)]
+    pub allowed_nodes: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +292,23 @@ pub struct AgentReportReq {
     pub success_chunks: u64,
     pub failed_chunks: u64,
     pub error_msg: Option<String>,
+}
+
+/// 节点领取待下发任务请求
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentClaimReq {
+    pub node_id: Uuid,
+}
+
+/// 节点领取待下发任务响应（领到任务时返回 200 + 此结构，没任务返回 204）
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentClaimResp {
+    pub dispatch_id: Uuid,
+    pub task_id: Uuid,
+    pub name: String,
+    pub url: String,
+    pub filename: String,
+    pub overrides: TaskOverrides,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
