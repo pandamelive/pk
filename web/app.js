@@ -147,6 +147,7 @@ function renderWorkflows(wfs) {
     <td>${w.target}</td>
     <td>${w.last_run_status ? pill(w.last_run_status) : "-"}</td>
     <td class="actions">
+      <button class="ghost" data-wf-toggle="${w.id}">${w.enable ? "禁用" : "启用"}</button>
       <button class="ghost" data-wf-trigger="${w.id}">触发</button>
       <button class="danger" data-wf-del="${w.id}">删除</button>
     </td>
@@ -369,6 +370,13 @@ document.addEventListener("click", async (e) => {
     } else if (t.dataset.wfTrigger) {
       await api(`/api/v1/workflows/${t.dataset.wfTrigger}/trigger`, { method: "POST" });
       alert("已触发");
+    } else if (t.dataset.wfToggle) {
+      const wf = cachedWorkflows.find((w) => w.id === t.dataset.wfToggle);
+      const newEnable = wf ? !wf.enable : true;
+      await api(`/api/v1/workflows/${t.dataset.wfToggle}`, {
+        method: "PUT",
+        body: JSON.stringify({ enable: newEnable }),
+      });
     } else if (t.dataset.wfDel) {
       if (!confirm("确定删除此工作流？")) return;
       await api(`/api/v1/workflows/${t.dataset.wfDel}`, { method: "DELETE" });

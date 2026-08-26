@@ -25,7 +25,8 @@ pub async fn start(state: Arc<AppState>) {
 /// 扫描所有启用的工作流，到点则触发执行
 async fn scan_and_trigger(state: &Arc<AppState>) -> Result<()> {
     let now = Utc::now();
-    let mut to_trigger: Vec<(Uuid, DateTime<Utc>)> = Vec::new();
+    let mut to_trigger: Vec<Uuid> = Vec::new();
+    let mut need_init: Vec<Uuid> = Vec::new();
 
     {
         let snap = state.snapshot().await;
@@ -33,33 +34,31 @@ async fn scan_and_trigger(state: &Arc<AppState>) -> Result<()> {
             if !wf.enable {
                 continue;
             }
-            // 计算下次执行时间
-            let next = compute_next_run(&wf.schedule, wf.last_run_at, now);
-            if let Some(next_time) = next {
-                if next_time <= now {
-                    to_trigger.push((wf.id, next_time));
-                }
+            match wf.next_run_at {
+                Some(next_time) if next_time <= now => to_trigger.push(wf.id),
+                None => need_init.push(wf.id), // 异常情况：启用但没有 next_run_at
+                _ => {}
             }
         }
     }
 
-    for (wf_id, _scheduled) in to_trigger {
-        trigger_workflow(state, wf_id).await?;
+    // 修复异常状态：启用但 next_run_at 为空，重新计算
+    if !need_init.is_empty() {
+        state
+            .with_mut(|snap| {
+                let now = Utc::now();
+                for id in &need_init {
+                    if let Some(wf) = snap.workflows.iter_mut().find(|w| w.id == *id) {
+                        wf.next_run_at = compute_next_run(&wf.schedule, wf.last_run_at, now);
+                    }
+                }
+            })
+            .await?;
     }
 
-    // 更新所有工作流的 next_run_at
-    state
-        .with_mut(|snap| {
-            let now = Utc::now();
-            for wf in &mut snap.workflows {
-                if wf.enable {
-                    wf.next_run_at = compute_next_run(&wf.schedule, wf.last_run_at, now);
-                } else {
-                    wf.next_run_at = None;
-                }
-            }
-        })
-        .await?;
+    for wf_id in to_trigger {
+        trigger_workflow(state, wf_id).await?;
+    }
 
     Ok(())
 }
@@ -79,10 +78,11 @@ pub async fn trigger_workflow(state: &Arc<AppState>, wf_id: Uuid) -> Result<Opti
     let run = state
         .with_mut(|snap| {
             let run = execute_workflow(snap, &wf);
-            // 更新工作流的最后执行信息
+            // 更新工作流的最后执行信息和下次执行时间
             if let Some(w) = snap.workflows.iter_mut().find(|w| w.id == wf.id) {
                 w.last_run_at = Some(now);
                 w.last_run_status = Some(run.status.clone());
+                w.next_run_at = compute_next_run(&wf.schedule, Some(now), now);
             }
             snap.workflow_runs.push(run.clone());
             // 限制运行记录数量，保留最近 500 条
