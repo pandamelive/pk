@@ -43,16 +43,6 @@ pub fn execute_workflow(snap: &mut Snapshot, wf: &Workflow) -> WorkflowRun {
     let mut dispatch_ids = Vec::new();
     let mut task_count = 0u32;
 
-    // 清理这些任务之前卡住的 Pending dispatch（避免旧触发阻塞新触发）
-    for &task_id in &wf.task_ids {
-        for d in snap.dispatches.iter_mut() {
-            if d.task_id == task_id && d.state == DispatchState::Pending {
-                d.state = DispatchState::Cancelled;
-                d.updated_at = now;
-            }
-        }
-    }
-
     for &task_id in &wf.task_ids {
         if create_pending_dispatch(snap, task_id, &wf.target, &wf.node_ids) {
             task_count += 1;
@@ -150,6 +140,59 @@ pub fn reclaim_timeout_tasks(snap: &mut Snapshot, timeout_secs: i64) {
             d.node_id = None;
             d.claimed_at = None;
             d.updated_at = now;
+        }
+    }
+}
+
+/// 修复卡住的工作流运行记录：状态为 running 但所有关联 dispatch 都已是终态
+/// （被取消的 dispatch 不会触发 apply_report，会导致工作流运行记录卡死在 running）
+pub fn fix_stuck_workflow_runs(snap: &mut Snapshot) {
+    for wr in snap.workflow_runs.iter_mut() {
+        if wr.status != "running" {
+            continue;
+        }
+        if wr.dispatch_ids.is_empty() {
+            continue;
+        }
+
+        let mut success = 0u32;
+        let mut failed = 0u32;
+        let mut pending_or_running = 0u32;
+
+        for did in &wr.dispatch_ids {
+            match snap.dispatches.iter().find(|d| d.id == *did) {
+                Some(d) => match d.state {
+                    DispatchState::Success => success += 1,
+                    DispatchState::Failed => failed += 1,
+                    DispatchState::Cancelled => failed += 1, // 被取消的算失败
+                    _ => pending_or_running += 1,
+                },
+                None => {
+                    // dispatch 不存在了，算失败
+                    failed += 1;
+                }
+            }
+        }
+
+        // 还有未完成的 dispatch，不修复
+        if pending_or_running > 0 {
+            continue;
+        }
+
+        // 所有 dispatch 都是终态，更新状态
+        wr.success_count = success;
+        wr.failed_count = failed;
+        wr.status = if failed == 0 {
+            "success".into()
+        } else if success == 0 {
+            "failed".into()
+        } else {
+            "partial".into()
+        };
+
+        // 同步更新工作流的 last_run_status
+        if let Some(wf) = snap.workflows.iter_mut().find(|w| w.id == wr.workflow_id) {
+            wf.last_run_status = Some(wr.status.clone());
         }
     }
 }

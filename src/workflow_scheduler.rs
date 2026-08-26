@@ -32,6 +32,7 @@ pub async fn start(state: Arc<AppState>) {
             if let Err(e) = state
                 .with_mut(|snap| {
                     scheduler::reclaim_timeout_tasks(snap, 180); // 3分钟超时回收
+                    scheduler::fix_stuck_workflow_runs(snap); // 修复卡住的工作流运行记录
                 })
                 .await
             {

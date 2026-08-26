@@ -52,6 +52,10 @@ impl AppState {
     }
 
     pub async fn persist(&self) -> Result<()> {
+        // 确保 data_dir 存在（防止运行时目录被删导致持久化失败）
+        tokio::fs::create_dir_all(&self.data_dir)
+            .await
+            .context("create data_dir for persist")?;
         let snap = self.inner.read().await.clone();
         let tmp = self.data_dir.join("state.json.tmp");
         let json = serde_json::to_string_pretty(&snap)?;
