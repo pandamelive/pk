@@ -59,6 +59,22 @@ $$(".nav").forEach((b) => {
   });
 });
 
+function applyDefaults(d) {
+  const setPH = (name, val) => {
+    const el = document.querySelector(`[name="${name}"]`);
+    if (el && val !== undefined && val !== null) el.placeholder = `默认 ${val}`;
+  };
+  setPH("connections_per_file", d.connections_per_file);
+  setPH("retry_times", d.retry_times);
+  setPH("timeout", d.timeout);
+  setPH("max_concurrent", d.max_concurrent);
+  setPH("save_path", d.save_path);
+  document.querySelectorAll(".def-hint").forEach((el) => {
+    const key = el.dataset.def;
+    if (key in d) el.textContent = `（默认：${d[key] ? "开启" : "关闭"}）`;
+  });
+}
+
 function renderKpis(o) {
   if (o.version) $("#pk-version").textContent = "v" + o.version;
   const items = [
@@ -77,13 +93,15 @@ function renderKpis(o) {
 async function refresh() {
   $("#clock").textContent = new Date().toLocaleString();
   try {
-    const [ov, nodes, tasks, runs, arts] = await Promise.all([
+    const [ov, nodes, tasks, runs, arts, defaults] = await Promise.all([
       api("/api/v1/overview"),
       api("/api/v1/nodes"),
       api("/api/v1/tasks"),
       api(" /api/v1/runs".trim()),
       api("/api/v1/artifacts"),
+      api("/api/v1/defaults").catch(() => null),
     ]);
+    if (defaults) applyDefaults(defaults);
     renderKpis(ov);
     $("#dash-nodes").innerHTML = (nodes.slice(0, 8).map((n) =>
       `<div class="row-item">${dot(n.status)}<span>${n.hostname}</span><span class="mono">${n.platform}</span>${pill(n.status)}</div>`
