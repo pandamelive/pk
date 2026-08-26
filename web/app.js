@@ -431,14 +431,14 @@ document.querySelector('[name="target"]')?.addEventListener("change", (e) => {
 // 工作流表单提交
 $("#workflow-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const fd = new FormData(e.target);
-  const name = fd.get("name")?.toString().trim();
-  if (!name) { alert("工作流名称必填"); return; }
-  const taskIds = $$('[name="wf_task"]:checked').map((el) => el.value);
-  if (taskIds.length === 0) { alert("请至少选择一个任务"); return; }
-  const target = fd.get("target") || "any";
-  const nodeIds = target === "nodes" ? $$('[name="wf_node"]:checked').map((el) => el.value) : [];
   try {
+    const fd = new FormData(e.target);
+    const name = fd.get("name")?.toString().trim();
+    if (!name) { alert("工作流名称必填"); return; }
+    const taskIds = Array.from($$('[name="wf_task"]:checked')).map((el) => el.value);
+    if (taskIds.length === 0) { alert("请至少选择一个任务"); return; }
+    const target = fd.get("target") || "any";
+    const nodeIds = target === "nodes" ? Array.from($$('[name="wf_node"]:checked')).map((el) => el.value) : [];
     const schedule = buildScheduleFromForm(fd);
     await api("/api/v1/workflows", {
       method: "POST",
@@ -456,7 +456,7 @@ $("#workflow-form").addEventListener("submit", async (e) => {
     $("#node-picker-wrap")?.classList.add("hidden");
     refresh();
   } catch (err) {
-    alert(err.message);
+    alert("创建失败: " + err.message);
   }
 });
 
