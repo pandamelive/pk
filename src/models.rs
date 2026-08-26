@@ -278,6 +278,17 @@ pub struct NodeConfig {
     pub tasks: Vec<TaskItem>,
 }
 
+/// claim 接口返回给 spde 节点的任务信息（与 spde 的 ClaimResp 对应）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimTaskResp {
+    pub dispatch_id: Uuid,
+    pub task_id: Uuid,
+    pub name: String,
+    pub url: String,
+    pub filename: String,
+    pub overrides: TaskOverrides,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowDetail {
     pub workflow: Workflow,

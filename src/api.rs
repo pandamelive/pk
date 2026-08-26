@@ -1,6 +1,7 @@
 use crate::config::SpdeDefaults;
 use crate::models::*;
 use crate::scheduler;
+use crate::spde_cfg;
 use crate::store::{artifact_filename, detect_host_platform, AppState};
 use crate::ws;
 use crate::workflow_scheduler;
@@ -90,7 +91,10 @@ pub async fn list_nodes(State(state): State<Arc<AppState>>) -> ApiResult<Vec<Nod
                         platform: r.get(2)?,
                         arch: r.get(3)?,
                         version: r.get(4)?,
-                        status: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or(NodeStatus::Offline),
+                        status: match r.get::<_, String>(5)?.as_str() {
+                            "online" => NodeStatus::Online,
+                            _ => NodeStatus::Offline,
+                        },
                         last_seen: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(6)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
                         registered_at: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(7)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
                         labels: serde_json::from_str(&labels_str).unwrap_or_default(),
@@ -312,6 +316,17 @@ pub async fn get_defaults(State(state): State<Arc<AppState>>) -> ApiResult<SpdeD
     Ok(Json(ApiResponse::ok(state.cfg.spde_defaults.clone())))
 }
 
+/// 节点拉取 YAML 格式配置（SPDE 节点调用）
+pub async fn get_node_config_yaml(
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let master_url = format!("http://{}", state.cfg.listen);
+    let heartbeat_interval = state.cfg.heartbeat_timeout_secs / 3;
+    let yaml = spde_cfg::render_config(&state.cfg.spde_defaults, &[], &master_url, node_id, heartbeat_interval);
+    ([("content-type", "application/yaml; charset=utf-8")], yaml).into_response()
+}
+
 // ── Agent 接口（节点调用） ────────────────────────────────
 
 pub async fn agent_register(
@@ -430,8 +445,15 @@ pub async fn agent_claim(
 
     match result {
         Ok(Some(node_task)) => {
-            let cfg = ws::build_node_task_config(&state, &node_task);
-            (StatusCode::OK, Json(ApiResponse::ok(cfg))).into_response()
+            let resp = ClaimTaskResp {
+                dispatch_id: node_task.dispatch_id,
+                task_id: node_task.task.id,
+                name: node_task.task.name,
+                url: node_task.task.url,
+                filename: node_task.task.filename,
+                overrides: node_task.task.overrides,
+            };
+            (StatusCode::OK, Json(ApiResponse::ok(resp))).into_response()
         }
         Ok(None) => {
             // 池子空，返回 204
@@ -467,7 +489,11 @@ fn map_workflow(r: &rusqlite::Row) -> rusqlite::Result<Workflow> {
         enable: r.get::<_, i64>(2)? != 0,
         schedule: serde_json::from_str(&schedule_str).unwrap_or(WorkflowSchedule::Once { at: Utc::now() }),
         task_ids: serde_json::from_str(&task_ids_str).unwrap_or_default(),
-        target: serde_json::from_str(&target_str).unwrap_or_default(),
+        target: match target_str.as_str() {
+            "all" => AssignmentTarget::All,
+            "nodes" => AssignmentTarget::Nodes,
+            _ => AssignmentTarget::Any,
+        },
         node_ids: serde_json::from_str(&node_ids_str).unwrap_or_default(),
         next_run_at: r.get::<_, Option<String>>(7)?.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
         last_run_at: r.get::<_, Option<String>>(8)?.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
@@ -651,11 +677,22 @@ pub async fn list_dispatches(State(state): State<Arc<AppState>>) -> ApiResult<Ve
                         id: r.get::<_, String>(0)?.parse().unwrap(),
                         task_id: r.get::<_, String>(1)?.parse().unwrap(),
                         node_id: r.get::<_, Option<String>>(2)?.and_then(|s| s.parse().ok()),
-                        state: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or(DispatchState::Pending),
+                        state: match r.get::<_, String>(3)?.as_str() {
+                            "acked" => DispatchState::Acked,
+                            "running" => DispatchState::Running,
+                            "success" => DispatchState::Success,
+                            "failed" => DispatchState::Failed,
+                            "cancelled" => DispatchState::Cancelled,
+                            _ => DispatchState::Pending,
+                        },
                         created_at: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(4)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
                         updated_at: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(5)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
                         claimed_at: r.get::<_, Option<String>>(6)?.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-                        target: serde_json::from_str(&target_str).unwrap_or_default(),
+                        target: match target_str.as_str() {
+                            "all" => AssignmentTarget::All,
+                            "nodes" => AssignmentTarget::Nodes,
+                            _ => AssignmentTarget::Any,
+                        },
                         allowed_nodes: serde_json::from_str(&allowed_str).unwrap_or_default(),
                     })
                 })?
@@ -708,6 +745,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         // 节点
         .route("/api/v1/nodes", get(list_nodes))
         .route("/api/v1/nodes/{id}", delete(delete_node))
+        .route("/api/v1/nodes/{id}/config.yaml", get(get_node_config_yaml))
         // 任务
         .route("/api/v1/tasks", get(list_tasks).post(create_task))
         .route("/api/v1/tasks/{id}", put(update_task).delete(delete_task))
@@ -727,7 +765,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/v1/agent/report", post(agent_report))
         .route("/api/v1/agent/claim", post(agent_claim))
         // WebSocket
-        .route("/ws", get(ws::ws_handler))
+        .route("/api/v1/agent/ws", get(ws::ws_handler))
         // 二进制分发
         .route("/api/v1/artifacts/{platform}", get(serve_artifact))
         .with_state(state)

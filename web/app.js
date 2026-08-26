@@ -208,10 +208,9 @@ function buildScheduleFromForm(fd) {
 
 async function renderWorkflowDetail(wfId) {
   try {
-    const [wf, runs] = await Promise.all([
-      api(`/api/v1/workflows/${wfId}`),
-      api(`/api/v1/workflows/${wfId}/runs`),
-    ]);
+    const detail = await api(`/api/v1/workflows/${wfId}`);
+    const wf = detail.workflow;
+    const runs = detail.runs;
     currentWorkflowId = wfId;
     $("#wf-detail-name").textContent = wf.name;
     $("#wf-detail-meta").innerHTML = `
@@ -269,7 +268,7 @@ function renderExecution(dispatches, tasks, nodes) {
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
   const pending = dispatches.filter((d) => d.state === "pending" && !d.node_id);
-  const running = dispatches.filter((d) => d.state === "running");
+  const running = dispatches.filter((d) => d.state === "running" || d.state === "acked");
   const done = dispatches.filter((d) => d.state === "success" || d.state === "failed");
 
   // KPI
@@ -381,15 +380,19 @@ async function refresh() {
     renderRuns(runs);
     renderArtifacts(arts);
     renderExecution(dispatches, tasks, nodes);
+    // 重渲染任务/节点选择器前保存勾选状态，避免刷新丢失
+    const checkedTasks = Array.from($$('[name="wf_task"]:checked')).map((el) => el.value);
+    const checkedNodes = Array.from($$('[name="wf_node"]:checked')).map((el) => el.value);
     renderTaskPicker(tasks);
     renderNodePicker(nodes);
+    checkedTasks.forEach((id) => { const el = document.querySelector(`[name="wf_task"][value="${id}"]`); if (el) el.checked = true; });
+    checkedNodes.forEach((id) => { const el = document.querySelector(`[name="wf_node"][value="${id}"]`); if (el) el.checked = true; });
     // 如果当前在工作流详情页，刷新详情
     if (currentView === "workflow-detail" && currentWorkflowId) {
       try {
-        const [wf, wfRuns] = await Promise.all([
-          api(`/api/v1/workflows/${currentWorkflowId}`),
-          api(`/api/v1/workflows/${currentWorkflowId}/runs`),
-        ]);
+        const detail = await api(`/api/v1/workflows/${currentWorkflowId}`);
+        const wf = detail.workflow;
+        const wfRuns = detail.runs;
         $("#wf-detail-meta").innerHTML = `
           <div><b>状态：</b>${wf.enable ? "启用" : "禁用"}</div>
           <div><b>定时规则：</b>${scheduleLabel(wf.schedule)}</div>

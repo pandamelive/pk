@@ -2,7 +2,7 @@ use crate::models::*;
 use crate::scheduler;
 use crate::store::AppState;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
@@ -13,13 +13,20 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
-// ── WebSocket 消息协议 ───────────────────────────────────
+// ── WebSocket 消息协议（与 SPDE 节点端一一对应） ──────────
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
     ConfigChanged,
     NewTask,
+    Ping,
+    DeleteFile {
+        filename: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        save_path: Option<String>,
+    },
+    // ── 旧协议兼容 ──
     HeartbeatAck { timestamp: String },
     Error { message: String },
 }
@@ -27,6 +34,36 @@ pub enum ServerMsg {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
+    // ── 新协议（SPDE 节点） ──
+    Status {
+        active_tasks: u32,
+        bytes_downloaded: u64,
+        #[serde(default)]
+        busy: bool,
+        #[serde(default)]
+        last_error: Option<String>,
+    },
+    TaskStarted {
+        dispatch_id: Uuid,
+    },
+    TaskReport {
+        dispatch_id: Option<Uuid>,
+        task_id: Option<Uuid>,
+        task_name: String,
+        url: String,
+        filename: String,
+        file_size: u64,
+        downloaded_bytes: u64,
+        elapsed_secs: f64,
+        avg_speed_mbps: f64,
+        status: String,
+        success_chunks: u64,
+        failed_chunks: u64,
+        #[serde(default)]
+        error_msg: Option<String>,
+    },
+    Pong,
+    // ── 旧协议兼容 ──
     Register {
         node_id: Uuid,
         hostname: String,
@@ -39,7 +76,6 @@ pub enum ClientMsg {
         active_tasks: u32,
         bytes_downloaded: u64,
     },
-    Pong,
 }
 
 // ── 连接管理 ──────────────────────────────────────────────
@@ -60,9 +96,9 @@ impl WsManager {
         }
     }
 
-    pub async fn register(&self, conn_id: Uuid, tx: mpsc::UnboundedSender<Message>) {
+    pub async fn register(&self, conn_id: Uuid, tx: mpsc::UnboundedSender<Message>, node_id: Option<Uuid>) {
         let mut conns = self.conns.write().await;
-        conns.insert(conn_id, NodeConn { tx, node_id: None });
+        conns.insert(conn_id, NodeConn { tx, node_id });
     }
 
     pub async fn bind_node(&self, conn_id: Uuid, node_id: Uuid) {
@@ -77,7 +113,7 @@ impl WsManager {
         conns.remove(&conn_id);
     }
 
-    /// 向所有已注册的节点广播消息
+    /// 向所有已绑定节点的连接广播消息
     pub async fn broadcast(&self, msg: &ServerMsg) {
         let text = serde_json::to_string(msg).unwrap_or_default();
         let conns = self.conns.read().await;
@@ -91,15 +127,10 @@ impl WsManager {
 
 // ── 通知函数 ──────────────────────────────────────────────
 
-/// 通知所有节点：配置已变更（节点应重新拉取 config）
 pub async fn notify_config_changed(state: &Arc<AppState>) {
-    state
-        .ws_mgr
-        .broadcast(&ServerMsg::ConfigChanged)
-        .await;
+    state.ws_mgr.broadcast(&ServerMsg::ConfigChanged).await;
 }
 
-/// 通知所有节点：共享待下发池有新任务（空闲节点去 claim 领取）
 pub async fn notify_new_task(state: &Arc<AppState>) {
     state.ws_mgr.broadcast(&ServerMsg::NewTask).await;
 }
@@ -107,25 +138,58 @@ pub async fn notify_new_task(state: &Arc<AppState>) {
 // ── WebSocket 处理 ────────────────────────────────────────
 
 pub async fn ws_handler(
-    ws: WebSocketUpgrade,
+    Query(params): Query<HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
+    ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    // 新协议：SPDE 通过 ?node_id=xxx 携带节点 ID
+    let node_id = params.get("node_id").and_then(|s| Uuid::parse_str(s).ok());
+    ws.on_upgrade(move |socket| handle_socket(socket, state, node_id))
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+async fn handle_socket(socket: WebSocket, state: Arc<AppState>, initial_node_id: Option<Uuid>) {
     let (mut sender, mut receiver) = socket.split();
     let conn_id = Uuid::new_v4();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
 
-    state.ws_mgr.register(conn_id, tx).await;
-    tracing::info!("[ws] 新连接 conn_id={}", conn_id);
+    state.ws_mgr.register(conn_id, tx, initial_node_id).await;
 
-    // 发送任务：从 mpsc 接收消息并发送给客户端
+    // URL 带了 node_id → 新协议，立即标记节点在线
+    if let Some(nid) = initial_node_id {
+        let now = Utc::now();
+        if let Err(e) = state
+            .with_transaction(move |conn| {
+                conn.execute(
+                    "UPDATE nodes SET status='online', last_seen=?1 WHERE id=?2",
+                    params![now.to_rfc3339(), nid.to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+        {
+            tracing::warn!("[ws] 连接时更新节点状态失败: {}", e);
+        }
+        tracing::info!("[ws] 节点连接 conn_id={} node_id={}", conn_id, nid);
+    } else {
+        tracing::info!("[ws] 新连接 conn_id={} (旧协议，等待 register 消息)", conn_id);
+    }
+
+    // 发送任务：mpsc 消息 + 每 30 秒发 Ping 保活
     let send_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if sender.send(msg).await.is_err() {
-                break;
+        let mut ping = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = ping.tick() => {
+                    let text = serde_json::to_string(&ServerMsg::Ping).unwrap_or_default();
+                    if sender.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Some(msg) = rx.recv() => {
+                    if sender.send(msg).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -134,7 +198,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Text(text) => {
-                if let Err(e) = handle_client_msg(&state, conn_id, &text).await {
+                if let Err(e) = handle_client_msg(&state, conn_id, initial_node_id, &text).await {
                     tracing::warn!("[ws] 处理消息失败: {}", e);
                 }
             }
@@ -150,9 +214,104 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     tracing::info!("[ws] 连接关闭 conn_id={}", conn_id);
 }
 
-async fn handle_client_msg(state: &Arc<AppState>, conn_id: Uuid, text: &str) -> anyhow::Result<()> {
+async fn handle_client_msg(
+    state: &Arc<AppState>,
+    conn_id: Uuid,
+    node_id: Option<Uuid>,
+    text: &str,
+) -> anyhow::Result<()> {
     let msg: ClientMsg = serde_json::from_str(text)?;
     match msg {
+        // ── 新协议：节点状态上报 ──
+        ClientMsg::Status {
+            active_tasks,
+            bytes_downloaded,
+            busy: _,
+            last_error: _,
+        } => {
+            if let Some(nid) = node_id {
+                let now = Utc::now();
+                state
+                    .with_transaction(move |conn| {
+                        conn.execute(
+                            "UPDATE nodes SET status='online', last_seen=?1, active_tasks=?2, bytes_downloaded=?3 WHERE id=?4",
+                            params![now.to_rfc3339(), active_tasks, bytes_downloaded, nid.to_string()],
+                        )?;
+                        Ok(())
+                    })
+                    .await?;
+            }
+        }
+
+        // ── 新协议：任务开始 ──
+        ClientMsg::TaskStarted { dispatch_id } => {
+            state
+                .with_transaction(move |conn| {
+                    scheduler::mark_running(conn, dispatch_id)?;
+                    Ok(())
+                })
+                .await?;
+        }
+
+        // ── 新协议：任务完成报告 ──
+        ClientMsg::TaskReport {
+            dispatch_id,
+            task_id,
+            task_name,
+            url,
+            filename,
+            file_size,
+            downloaded_bytes,
+            elapsed_secs,
+            avg_speed_mbps,
+            status,
+            success_chunks,
+            failed_chunks,
+            error_msg,
+        } => {
+            if let Some(nid) = node_id {
+                let req = AgentReportReq {
+                    node_id: nid,
+                    dispatch_id,
+                    task_id,
+                    task_name,
+                    url,
+                    filename,
+                    file_size,
+                    downloaded_bytes,
+                    elapsed_secs,
+                    avg_speed_mbps,
+                    status,
+                    success_chunks,
+                    failed_chunks,
+                    error_msg,
+                };
+                state
+                    .with_transaction(move |conn| {
+                        scheduler::apply_report(conn, &req)?;
+                        Ok(())
+                    })
+                    .await?;
+            }
+        }
+
+        // ── 新协议：Ping 响应（保活） ──
+        ClientMsg::Pong => {
+            if let Some(nid) = node_id {
+                let now = Utc::now();
+                state
+                    .with_transaction(move |conn| {
+                        conn.execute(
+                            "UPDATE nodes SET status='online', last_seen=?1 WHERE id=?2",
+                            params![now.to_rfc3339(), nid.to_string()],
+                        )?;
+                        Ok(())
+                    })
+                    .await?;
+            }
+        }
+
+        // ── 旧协议兼容：WS 内注册 ──
         ClientMsg::Register {
             node_id,
             hostname,
@@ -162,8 +321,9 @@ async fn handle_client_msg(state: &Arc<AppState>, conn_id: Uuid, text: &str) -> 
         } => {
             state.ws_mgr.bind_node(conn_id, node_id).await;
             let now = Utc::now();
+            let host = hostname.clone();
             state
-                .with_transaction(|conn| {
+                .with_transaction(move |conn| {
                     let exists: bool = conn
                         .query_row(
                             "SELECT COUNT(*) FROM nodes WHERE id = ?1",
@@ -186,8 +346,10 @@ async fn handle_client_msg(state: &Arc<AppState>, conn_id: Uuid, text: &str) -> 
                     Ok(())
                 })
                 .await?;
-            tracing::info!("[ws] 节点注册 node_id={} hostname={}", node_id, hostname);
+            tracing::info!("[ws] 节点注册(旧协议) node_id={} hostname={}", node_id, host);
         }
+
+        // ── 旧协议兼容：心跳 ──
         ClientMsg::Heartbeat {
             node_id,
             active_tasks,
@@ -195,7 +357,7 @@ async fn handle_client_msg(state: &Arc<AppState>, conn_id: Uuid, text: &str) -> 
         } => {
             let now = Utc::now();
             state
-                .with_transaction(|conn| {
+                .with_transaction(move |conn| {
                     conn.execute(
                         "UPDATE nodes SET status='online', last_seen=?1, active_tasks=?2, bytes_downloaded=?3 WHERE id=?4",
                         params![now.to_rfc3339(), active_tasks, bytes_downloaded, node_id.to_string()],
@@ -204,7 +366,6 @@ async fn handle_client_msg(state: &Arc<AppState>, conn_id: Uuid, text: &str) -> 
                 })
                 .await?;
         }
-        ClientMsg::Pong => {}
     }
     Ok(())
 }

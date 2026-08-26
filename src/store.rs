@@ -38,6 +38,17 @@ impl AppState {
         )?;
         create_tables(&conn)?;
 
+        // 重启时回收所有非终态 dispatch，避免节点崩溃后任务永远卡在 running/acked
+        let reclaimed = conn
+            .execute(
+                "UPDATE dispatches SET state='pending', node_id=NULL, claimed_at=NULL WHERE state IN ('acked','running')",
+                [],
+            )
+            .unwrap_or(0);
+        if reclaimed > 0 {
+            tracing::info!("启动时回收 {} 个卡住的 dispatch 到待下发池", reclaimed);
+        }
+
         // 从旧 state.json 导入数据
         let json_path = data_dir.join("state.json");
         if json_path.exists() {
@@ -96,6 +107,12 @@ impl AppState {
         let now = Utc::now();
         let cutoff = (now - timeout).to_rfc3339();
         let conn = self.conn.lock().await;
+        // 双向同步：最近有心跳的设为 online，超时的设为 offline
+        conn.execute(
+            "UPDATE nodes SET status = 'online' WHERE last_seen >= ?1 AND status != 'online'",
+            params![cutoff],
+        )
+        .ok();
         conn.execute(
             "UPDATE nodes SET status = 'offline', active_tasks = 0 WHERE last_seen < ?1",
             params![cutoff],
