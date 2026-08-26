@@ -9,8 +9,13 @@ pub struct NodeTask {
     pub task: Task,
 }
 
-/// 按任务目标选出应收节点，并写入 pending dispatch（已有未完成的不重复发）。
-pub fn dispatch_task(snap: &mut Snapshot, task_id: Uuid) -> usize {
+/// 按指定目标把任务下发到节点，写入 pending dispatch（已有未完成的不重复发）。
+pub fn dispatch_task_to(
+    snap: &mut Snapshot,
+    task_id: Uuid,
+    target: &AssignmentTarget,
+    node_ids: &[Uuid],
+) -> usize {
     let Some(task) = snap.tasks.iter().find(|t| t.id == task_id).cloned() else {
         return 0;
     };
@@ -25,10 +30,9 @@ pub fn dispatch_task(snap: &mut Snapshot, task_id: Uuid) -> usize {
         .map(|n| n.id)
         .collect();
 
-    let targets: Vec<Uuid> = match task.target {
+    let targets: Vec<Uuid> = match target {
         AssignmentTarget::All => online,
-        AssignmentTarget::Nodes => task
-            .node_ids
+        AssignmentTarget::Nodes => node_ids
             .iter()
             .copied()
             .filter(|id| online.contains(id))
@@ -60,13 +64,42 @@ pub fn dispatch_task(snap: &mut Snapshot, task_id: Uuid) -> usize {
         });
         created += 1;
     }
+    created
+}
 
-    if let Some(t) = snap.tasks.iter_mut().find(|t| t.id == task_id) {
-        if created > 0 && t.status == TaskStatus::Draft {
-            t.status = TaskStatus::Queued;
+/// 执行工作流：按 task_ids 次序依次下发每个任务，返回运行记录
+pub fn execute_workflow(snap: &mut Snapshot, wf: &Workflow) -> WorkflowRun {
+    let now = Utc::now();
+    let mut dispatch_ids = Vec::new();
+    let mut task_count = 0u32;
+
+    for &task_id in &wf.task_ids {
+        let before = snap.dispatches.len();
+        let n = dispatch_task_to(snap, task_id, &wf.target, &wf.node_ids);
+        if n > 0 {
+            task_count += 1;
+            for d in &snap.dispatches[before..] {
+                dispatch_ids.push(d.id);
+            }
         }
     }
-    created
+
+    WorkflowRun {
+        id: Uuid::new_v4(),
+        workflow_id: wf.id,
+        workflow_name: wf.name.clone(),
+        triggered_at: now,
+        status: if task_count > 0 { "running".into() } else { "failed".into() },
+        task_count,
+        success_count: 0,
+        failed_count: 0,
+        dispatch_ids,
+        error_msg: if task_count == 0 {
+            Some("没有可用节点或任务全部禁用".into())
+        } else {
+            None
+        },
+    }
 }
 
 fn pick_least_loaded(snap: &Snapshot, online: &[Uuid]) -> Option<Uuid> {
@@ -96,7 +129,6 @@ fn pick_least_loaded(snap: &Snapshot, online: &[Uuid]) -> Option<Uuid> {
 }
 
 /// 取出该节点当前应执行的任务列表（基于 active dispatch 过滤）。
-/// 生成 config.yaml 时调用，确保 only 被分配到此节点且未完成的任务出现在 direct_tasks 中。
 pub fn active_tasks_for_node(snap: &Snapshot, node_id: Uuid) -> Vec<NodeTask> {
     snap.dispatches
         .iter()
@@ -132,8 +164,28 @@ pub fn apply_report(snap: &mut Snapshot, req: AgentReportReq) -> RunRecord {
             d.updated_at = now;
         }
     }
-    if let Some(tid) = req.task_id {
-        refresh_task_status(snap, tid);
+
+    // 更新关联的工作流运行记录
+    if let Some(did) = req.dispatch_id {
+        for wr in snap.workflow_runs.iter_mut() {
+            if wr.dispatch_ids.contains(&did) {
+                if req.status == "failed" {
+                    wr.failed_count += 1;
+                } else {
+                    wr.success_count += 1;
+                }
+                let total = wr.success_count + wr.failed_count;
+                if total >= wr.task_count {
+                    wr.status = if wr.failed_count == 0 {
+                        "success".into()
+                    } else if wr.success_count == 0 {
+                        "failed".into()
+                    } else {
+                        "partial".into()
+                    };
+                }
+            }
+        }
     }
 
     let rec = RunRecord {
@@ -158,53 +210,11 @@ pub fn apply_report(snap: &mut Snapshot, req: AgentReportReq) -> RunRecord {
     rec
 }
 
-fn refresh_task_status(snap: &mut Snapshot, task_id: Uuid) {
-    let related: Vec<_> = snap
-        .dispatches
-        .iter()
-        .filter(|d| d.task_id == task_id)
-        .map(|d| d.state.clone())
-        .collect();
-    if related.is_empty() {
-        return;
-    }
-    let all_done = related.iter().all(|s| {
-        matches!(
-            s,
-            DispatchState::Success | DispatchState::Failed | DispatchState::Cancelled
-        )
-    });
-    let any_fail = related.iter().any(|s| *s == DispatchState::Failed);
-    let any_run = related
-        .iter()
-        .any(|s| matches!(s, DispatchState::Running | DispatchState::Acked));
-    if let Some(t) = snap.tasks.iter_mut().find(|t| t.id == task_id) {
-        t.status = if !all_done {
-            if any_run {
-                TaskStatus::Running
-            } else {
-                TaskStatus::Queued
-            }
-        } else if any_fail {
-            TaskStatus::Failed
-        } else {
-            TaskStatus::Completed
-        };
-    }
-}
-
 pub fn mark_running(snap: &mut Snapshot, dispatch_id: Uuid) {
     let now = Utc::now();
-    let mut task_id = None;
     if let Some(d) = snap.dispatches.iter_mut().find(|d| d.id == dispatch_id) {
         d.state = DispatchState::Running;
         d.updated_at = now;
-        task_id = Some(d.task_id);
-    }
-    if let Some(tid) = task_id {
-        if let Some(t) = snap.tasks.iter_mut().find(|t| t.id == tid) {
-            t.status = TaskStatus::Running;
-        }
     }
 }
 
@@ -220,10 +230,6 @@ pub fn cancel_task(snap: &mut Snapshot, task_id: Uuid) {
             d.state = DispatchState::Cancelled;
             d.updated_at = now;
         }
-    }
-    if let Some(t) = snap.tasks.iter_mut().find(|t| t.id == task_id) {
-        t.status = TaskStatus::Cancelled;
-        t.enable = false;
     }
 }
 
@@ -247,17 +253,20 @@ pub fn overview(snap: &Snapshot) -> Overview {
         .map(|r| r.avg_speed_mbps)
         .sum();
     let speed_n = snap.runs.iter().filter(|r| r.avg_speed_mbps > 0.0).count();
+    let tasks_running = snap
+        .dispatches
+        .iter()
+        .filter(|d| matches!(d.state, DispatchState::Running | DispatchState::Acked))
+        .count();
     Overview {
         version: env!("CARGO_PKG_VERSION").to_string(),
         nodes_total: snap.nodes.len(),
         nodes_online,
         nodes_offline: snap.nodes.len().saturating_sub(nodes_online),
         tasks_total: snap.tasks.len(),
-        tasks_running: snap
-            .tasks
-            .iter()
-            .filter(|t| t.status == TaskStatus::Running)
-            .count(),
+        tasks_running,
+        workflows_total: snap.workflows.len(),
+        workflows_active: snap.workflows.iter().filter(|w| w.enable).count(),
         dispatches_pending: snap
             .dispatches
             .iter()

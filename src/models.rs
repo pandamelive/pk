@@ -32,6 +32,12 @@ pub enum AssignmentTarget {
     Nodes,
 }
 
+impl Default for AssignmentTarget {
+    fn default() -> Self {
+        AssignmentTarget::Any
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
     pub id: Uuid,
@@ -66,6 +72,7 @@ pub struct TaskOverrides {
     pub save_path: Option<String>,
 }
 
+/// 任务池中的任务定义（仅描述下载内容，不含调度信息）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: Uuid,
@@ -73,13 +80,58 @@ pub struct Task {
     pub url: String,
     pub filename: String,
     pub enable: bool,
-    pub target: AssignmentTarget,
-    pub node_ids: Vec<Uuid>,
-    pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
     pub note: String,
     #[serde(default)]
     pub overrides: TaskOverrides,
+}
+
+/// 工作流定时规则
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WorkflowSchedule {
+    /// 一次性执行
+    Once { at: DateTime<Utc> },
+    /// 固定间隔（秒）
+    Interval { seconds: u64 },
+    /// Cron 表达式（5段标准 cron）
+    Cron { expression: String },
+    /// 每天固定时间
+    Daily { hour: u32, minute: u32 },
+    /// 每周固定时间（weekday: 0=周日 ... 6=周六）
+    Weekly { weekday: u8, hour: u32, minute: u32 },
+}
+
+/// 工作流：定时规则 + 任务集合 + 节点选择
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Workflow {
+    pub id: Uuid,
+    pub name: String,
+    pub enable: bool,
+    pub schedule: WorkflowSchedule,
+    pub task_ids: Vec<Uuid>,
+    pub target: AssignmentTarget,
+    pub node_ids: Vec<Uuid>,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub last_run_status: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// 工作流单次执行记录
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowRun {
+    pub id: Uuid,
+    pub workflow_id: Uuid,
+    pub workflow_name: String,
+    pub triggered_at: DateTime<Utc>,
+    /// running / success / failed / partial
+    pub status: String,
+    pub task_count: u32,
+    pub success_count: u32,
+    pub failed_count: u32,
+    pub dispatch_ids: Vec<Uuid>,
+    pub error_msg: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -129,6 +181,48 @@ pub struct Snapshot {
     pub tasks: Vec<Task>,
     pub dispatches: Vec<Dispatch>,
     pub runs: Vec<RunRecord>,
+    pub workflows: Vec<Workflow>,
+    pub workflow_runs: Vec<WorkflowRun>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTaskReq {
+    pub name: String,
+    pub url: String,
+    pub filename: String,
+    #[serde(default = "default_true")]
+    pub enable: bool,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub overrides: TaskOverrides,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateWorkflowReq {
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enable: bool,
+    pub schedule: WorkflowSchedule,
+    pub task_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub target: AssignmentTarget,
+    #[serde(default)]
+    pub node_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateWorkflowReq {
+    pub name: Option<String>,
+    pub enable: Option<bool>,
+    pub schedule: Option<WorkflowSchedule>,
+    pub task_ids: Option<Vec<Uuid>>,
+    pub target: Option<AssignmentTarget>,
+    pub node_ids: Option<Vec<Uuid>>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,36 +284,6 @@ pub struct AgentReportReq {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateTaskReq {
-    pub name: String,
-    pub url: String,
-    pub filename: String,
-    #[serde(default = "default_true")]
-    pub enable: bool,
-    #[serde(default)]
-    pub target: AssignmentTarget,
-    #[serde(default)]
-    pub node_ids: Vec<Uuid>,
-    #[serde(default)]
-    pub note: String,
-    /// 创建后立即调度下发
-    #[serde(default = "default_true")]
-    pub dispatch_now: bool,
-    #[serde(default)]
-    pub overrides: TaskOverrides,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-impl Default for AssignmentTarget {
-    fn default() -> Self {
-        AssignmentTarget::Any
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Overview {
     pub version: String,
     pub nodes_total: usize,
@@ -227,6 +291,8 @@ pub struct Overview {
     pub nodes_offline: usize,
     pub tasks_total: usize,
     pub tasks_running: usize,
+    pub workflows_total: usize,
+    pub workflows_active: usize,
     pub dispatches_pending: usize,
     pub bytes_downloaded: u64,
     pub runs_success: usize,

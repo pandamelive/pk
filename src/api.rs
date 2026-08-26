@@ -2,6 +2,7 @@ use crate::models::*;
 use crate::scheduler;
 use crate::spde_cfg;
 use crate::store::{artifact_filename, AppState};
+use crate::workflow_scheduler::{self, compute_next_run};
 use crate::ws::{self, WsQuery};
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
@@ -24,8 +25,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/nodes/{id}", get(get_node).delete(delete_node))
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", get(get_task).patch(patch_task).delete(delete_task))
-        .route("/tasks/{id}/dispatch", post(dispatch_task))
         .route("/tasks/{id}/cancel", post(cancel_task))
+        .route("/workflows", get(list_workflows).post(create_workflow))
+        .route(
+            "/workflows/{id}",
+            get(get_workflow).put(update_workflow).delete(delete_workflow),
+        )
+        .route("/workflows/{id}/trigger", post(trigger_workflow))
+        .route("/workflows/{id}/runs", get(list_workflow_runs))
         .route("/dispatches", get(list_dispatches))
         .route("/runs", get(list_runs))
         .route("/defaults", get(get_defaults).put(put_defaults))
@@ -89,7 +96,6 @@ fn err(code: StatusCode, msg: impl Into<String>) -> (StatusCode, String) {
     (code, msg.into())
 }
 
-/// 计算 config.yaml 内容的 SHA256，作为 config_version
 fn config_hash(yaml: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(yaml.as_bytes());
@@ -142,6 +148,8 @@ async fn delete_offline_nodes(State(s): State<Arc<AppState>>) -> ApiResult<Json<
     Ok(Json(serde_json::json!({ "removed": n })))
 }
 
+// ==================== 任务（任务池） ====================
+
 async fn list_tasks(State(s): State<Arc<AppState>>) -> Json<Vec<Task>> {
     let mut tasks = s.snapshot().await.tasks;
     tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -172,26 +180,17 @@ async fn create_task(
         url: req.url,
         filename: req.filename,
         enable: req.enable,
-        target: req.target,
-        node_ids: req.node_ids,
-        status: TaskStatus::Draft,
         created_at: now,
         note: req.note,
         overrides: req.overrides,
     };
-    let dispatch_now = req.dispatch_now && req.enable;
     let out = s
         .with_mut(|snap| {
             snap.tasks.push(task.clone());
-            if dispatch_now {
-                scheduler::dispatch_task(snap, task.id);
-            }
-            snap.tasks.iter().find(|t| t.id == task.id).cloned().unwrap()
+            task
         })
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    ws::notify_config_changed(&s).await;
     Ok(Json(out))
 }
 
@@ -201,8 +200,6 @@ pub struct PatchTaskReq {
     pub url: Option<String>,
     pub filename: Option<String>,
     pub enable: Option<bool>,
-    pub target: Option<AssignmentTarget>,
-    pub node_ids: Option<Vec<Uuid>>,
     pub note: Option<String>,
     pub overrides: Option<TaskOverrides>,
 }
@@ -226,12 +223,6 @@ async fn patch_task(
             }
             if let Some(v) = req.enable {
                 t.enable = v;
-            }
-            if let Some(v) = req.target {
-                t.target = v;
-            }
-            if let Some(v) = req.node_ids {
-                t.node_ids = v;
             }
             if let Some(v) = req.note {
                 t.note = v;
@@ -260,12 +251,10 @@ async fn delete_task(
     Path(id): Path<Uuid>,
     Query(q): Query<DeleteTaskQuery>,
 ) -> ApiResult<StatusCode> {
-    // 先拿到任务信息和相关节点，用于删文件通知
     let (filename, save_path, node_ids) = {
         let snap = s.snapshot().await;
         let task = snap.tasks.iter().find(|t| t.id == id);
         let fname = task.map(|t| t.filename.clone()).unwrap_or_default();
-        // 任务级 save_path 覆盖，否则用全局默认
         let spath = task
             .and_then(|t| t.overrides.save_path.clone())
             .unwrap_or_else(|| s.cfg.spde_defaults.save_path.clone());
@@ -285,7 +274,6 @@ async fn delete_task(
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // 如果要求删除文件，通知所有相关节点
     if q.delete_file && !filename.is_empty() {
         for nid in &node_ids {
             ws::notify_delete_file(&s, *nid, &filename, &save_path).await;
@@ -294,20 +282,6 @@ async fn delete_task(
 
     ws::notify_config_changed(&s).await;
     Ok(StatusCode::NO_CONTENT)
-}
-
-async fn dispatch_task(
-    State(s): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
-) -> ApiResult<Json<serde_json::Value>> {
-    s.refresh_online().await;
-    let n = s
-        .with_mut(|snap| scheduler::dispatch_task(snap, id))
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    ws::notify_config_changed(&s).await;
-    Ok(Json(serde_json::json!({ "dispatched": n })))
 }
 
 async fn cancel_task(
@@ -321,6 +295,160 @@ async fn cancel_task(
     ws::notify_config_changed(&s).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
+
+// ==================== 工作流 ====================
+
+async fn list_workflows(State(s): State<Arc<AppState>>) -> Json<Vec<Workflow>> {
+    let mut wfs = s.snapshot().await.workflows;
+    wfs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Json(wfs)
+}
+
+async fn get_workflow(State(s): State<Arc<AppState>>, Path(id): Path<Uuid>) -> ApiResult<Json<Workflow>> {
+    s.snapshot()
+        .await
+        .workflows
+        .into_iter()
+        .find(|w| w.id == id)
+        .map(Json)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "workflow not found"))
+}
+
+async fn create_workflow(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<CreateWorkflowReq>,
+) -> ApiResult<Json<Workflow>> {
+    if req.name.trim().is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "name required"));
+    }
+    if req.task_ids.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "at least one task required"));
+    }
+    let now = Utc::now();
+    let next_run = if req.enable {
+        compute_next_run(&req.schedule, None, now)
+    } else {
+        None
+    };
+    let wf = Workflow {
+        id: Uuid::new_v4(),
+        name: req.name,
+        enable: req.enable,
+        schedule: req.schedule,
+        task_ids: req.task_ids,
+        target: req.target,
+        node_ids: req.node_ids,
+        next_run_at: next_run,
+        last_run_at: None,
+        last_run_status: None,
+        created_at: now,
+    };
+    let out = s
+        .with_mut(|snap| {
+            snap.workflows.push(wf.clone());
+            wf
+        })
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(out))
+}
+
+async fn update_workflow(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateWorkflowReq>,
+) -> ApiResult<Json<Workflow>> {
+    let now = Utc::now();
+    let wf = s
+        .with_mut(|snap| {
+            let wf = snap.workflows.iter_mut().find(|w| w.id == id)?;
+            if let Some(v) = req.name {
+                wf.name = v;
+            }
+            if let Some(v) = req.enable {
+                wf.enable = v;
+            }
+            if let Some(v) = req.schedule {
+                wf.schedule = v;
+            }
+            if let Some(v) = req.task_ids {
+                wf.task_ids = v;
+            }
+            if let Some(v) = req.target {
+                wf.target = v;
+            }
+            if let Some(v) = req.node_ids {
+                wf.node_ids = v;
+            }
+            // 重新计算下次执行时间
+            wf.next_run_at = if wf.enable {
+                compute_next_run(&wf.schedule, wf.last_run_at, now)
+            } else {
+                None
+            };
+            Some(wf.clone())
+        })
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    wf.map(Json)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "workflow not found"))
+}
+
+async fn delete_workflow(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    s.with_mut(|snap| {
+        snap.workflows.retain(|w| w.id != id);
+        snap.workflow_runs.retain(|r| r.workflow_id != id);
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn trigger_workflow(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<WorkflowRun>> {
+    let run = workflow_scheduler::trigger_workflow(&s, id)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "workflow not found"))?;
+
+    ws::notify_config_changed(&s).await;
+    Ok(Json(run))
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowRunsQuery {
+    limit: Option<usize>,
+}
+
+async fn list_workflow_runs(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<WorkflowRunsQuery>,
+) -> ApiResult<Json<Vec<WorkflowRun>>> {
+    let exists = s.snapshot().await.workflows.iter().any(|w| w.id == id);
+    if !exists {
+        return Err(err(StatusCode::NOT_FOUND, "workflow not found"));
+    }
+    let mut runs: Vec<WorkflowRun> = s
+        .snapshot()
+        .await
+        .workflow_runs
+        .into_iter()
+        .filter(|r| r.workflow_id == id)
+        .collect();
+    runs.sort_by(|a, b| b.triggered_at.cmp(&a.triggered_at));
+    let limit = q.limit.unwrap_or(100).min(500);
+    runs.truncate(limit);
+    Ok(Json(runs))
+}
+
+// ==================== 其他 ====================
 
 async fn list_dispatches(State(s): State<Arc<AppState>>) -> Json<Vec<Dispatch>> {
     let mut d = s.snapshot().await.dispatches;
@@ -517,7 +645,6 @@ async fn agent_heartbeat(
         return Err(err(StatusCode::NOT_FOUND, "node not registered"));
     }
 
-    // 生成该节点 config 并算 hash —— SPDE 对比 config_version 决定是否重拉
     let snap = s.snapshot().await;
     let tasks = scheduler::active_tasks_for_node(&snap, node_id);
     let yaml = spde_cfg::render_config(&s.cfg.spde_defaults, &tasks, &master, node_id, 5);
@@ -618,6 +745,5 @@ pub async fn merge_web(app: Router) -> Router {
 #[allow(dead_code)]
 fn _body(_: Body) {}
 
-// WsQuery re-export for compile-time check that query param name matches
 #[allow(dead_code)]
 fn _ws_query_check(_: WsQuery) {}

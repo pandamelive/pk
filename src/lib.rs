@@ -5,6 +5,7 @@ pub mod scheduler;
 pub mod spde_cfg;
 pub mod store;
 pub mod web;
+pub mod workflow_scheduler;
 pub mod ws;
 
 pub use config::PkConfig;

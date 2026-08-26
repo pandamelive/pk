@@ -1,64 +1,43 @@
-const $ = (s, r = document) => r.querySelector(s);
-const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => document.querySelectorAll(s);
 
-const tokenInput = $("#token");
-tokenInput.value = localStorage.getItem("pk_token") || "";
-tokenInput.addEventListener("change", () => localStorage.setItem("pk_token", tokenInput.value.trim()));
+const API_BASE = "";
+let currentView = "dash";
+let currentWorkflowId = null;
+let cachedTasks = [];
+let cachedNodes = [];
+let cachedWorkflows = [];
 
 async function api(path, opts = {}) {
-  const headers = { ...(opts.headers || {}) };
-  const t = tokenInput.value.trim();
-  if (t) headers.Authorization = `Bearer ${t}`;
-  if (opts.body && typeof opts.body === "object" && !(opts.body instanceof FormData)) {
-    headers["Content-Type"] = "application/json";
-    opts.body = JSON.stringify(opts.body);
+  const headers = { "Content-Type": "application/json" };
+  const token = $("#token")?.value?.trim();
+  if (token) headers["Authorization"] = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
+  const res = await fetch(API_BASE + path, { ...opts, headers: { ...headers, ...(opts.headers || {}) } });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`${res.status} ${text || res.statusText}`);
   }
-  const res = await fetch(path, { ...opts, headers });
   if (res.status === 204) return null;
-  const text = await res.text();
-  if (!res.ok) throw new Error(text || res.statusText);
-  if (!text) return null;
-  try { return JSON.parse(text); } catch { return text; }
+  return res.json();
 }
 
-function fmtBytes(n) {
-  n = Number(n) || 0;
-  if (n < 1024) return n + " B";
-  if (n < 1024 ** 2) return (n / 1024).toFixed(1) + " KB";
-  if (n < 1024 ** 3) return (n / 1024 ** 2).toFixed(1) + " MB";
-  return (n / 1024 ** 3).toFixed(2) + " GB";
+const fmtBytes = (b) => {
+  if (!b) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return b.toFixed(1) + " " + u[i];
+};
+const fmtTime = (t) => new Date(t).toLocaleString();
+
+function dot(s) {
+  return `<span class="dot ${s}"></span>`;
 }
-function fmtTime(iso) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return d.toLocaleString();
-}
-function pill(status) {
-  const cls = {
-    online: "ok", offline: "", busy: "run",
-    success: "ok", skipped: "ok", failed: "fail",
-    running: "run", queued: "run", completed: "ok", cancelled: "",
-    draft: "", pending: "run", acked: "run",
-  }[status] || "";
-  return `<span class="pill ${cls}">${status}</span>`;
-}
-function dot(status) {
-  const c = status === "online" ? "online" : status === "busy" ? "busy" : "offline";
-  return `<span class="dot ${c}"></span>`;
+function pill(s) {
+  return `<span class="pill ${s}">${s}</span>`;
 }
 
-$$(".nav").forEach((b) => {
-  b.addEventListener("click", () => {
-    $$(".nav").forEach((x) => x.classList.remove("on"));
-    b.classList.add("on");
-    const v = b.dataset.view;
-    $$(".view").forEach((el) => el.classList.add("hidden"));
-    $(`#view-${v}`).classList.remove("hidden");
-    const names = { dash: "总览", nodes: "节点", tasks: "任务", runs: "记录", ship: "下发" };
-    $("#title").textContent = names[v];
-  });
-});
-
+// ==================== 默认值 ====================
 function applyDefaults(d) {
   const setPH = (name, val) => {
     const el = document.querySelector(`[name="${name}"]`);
@@ -81,32 +60,233 @@ function applyDefaults(d) {
   });
 }
 
+// ==================== 总览 ====================
 function renderKpis(o) {
   if (o.version) $("#pk-version").textContent = "v" + o.version;
   const items = [
     ["在线节点", `${o.nodes_online} / ${o.nodes_total}`],
     ["运行中任务", String(o.tasks_running)],
+    ["工作流", `${o.workflows_active} / ${o.workflows_total}`],
     ["待下发", String(o.dispatches_pending)],
     ["累计下载", fmtBytes(o.bytes_downloaded)],
     ["成功次数", String(o.runs_success)],
     ["失败次数", String(o.runs_failed)],
     ["平均速度", (o.avg_speed_mbps || 0).toFixed(1) + " MB/s"],
-    ["任务总数", String(o.tasks_total)],
   ];
   $("#kpis").innerHTML = items.map(([k, v]) => `<div class="kpi"><span>${k}</span><b>${v}</b></div>`).join("");
 }
 
+// ==================== 节点 ====================
+function renderNodes(nodes) {
+  $("#node-body").innerHTML = nodes.map((n) => `<tr>
+    <td>${dot(n.status)}${pill(n.status)}</td>
+    <td>${n.hostname}<div class="mono">${n.id}</div></td>
+    <td>${n.platform} / ${n.arch}</td>
+    <td>${n.version}</td>
+    <td>${n.active_tasks}</td>
+    <td>${fmtBytes(n.bytes_downloaded)}</td>
+    <td>${fmtTime(n.last_seen)}</td>
+    <td class="actions"><button class="ghost" data-del-node="${n.id}">移除</button></td>
+  </tr>`).join("");
+}
+
+// ==================== 任务（任务池） ====================
+function renderTasks(tasks) {
+  $("#task-body").innerHTML = tasks.map((t) => `<tr>
+    <td>${t.enable ? pill("enabled") : pill("disabled")}</td>
+    <td>${t.name}<div class="mono">${t.url}</div></td>
+    <td>${t.filename}</td>
+    <td class="mono">${t.url.substring(0, 40)}${t.url.length > 40 ? "..." : ""}</td>
+    <td>${fmtTime(t.created_at)}</td>
+    <td class="actions">
+      <button class="ghost" data-cancel="${t.id}">取消</button>
+      <button class="danger" data-del-task="${t.id}">删除</button>
+    </td>
+  </tr>`).join("");
+}
+
+function buildOverridesFromForm(fd) {
+  const overrides = {};
+  const num = (k) => {
+    const v = fd.get(k);
+    return v !== null && v.toString().trim() !== "" ? Number(v) : undefined;
+  };
+  const mc = num("max_concurrent"); if (mc !== undefined) overrides.max_concurrent = mc;
+  const cpf = num("connections_per_file"); if (cpf !== undefined) overrides.connections_per_file = cpf;
+  const rt = num("retry_times"); if (rt !== undefined) overrides.retry_times = rt;
+  const to = num("timeout"); if (to !== undefined) overrides.timeout = to;
+  const sp = fd.get("save_path")?.toString().trim(); if (sp) overrides.save_path = sp;
+  if (fd.get("skip_tls_verify") === "on") overrides.skip_tls_verify = true;
+  if (fd.get("dry_run") === "on") overrides.dry_run = false;
+  return overrides;
+}
+
+// ==================== 工作流 ====================
+function scheduleLabel(s) {
+  if (!s) return "-";
+  switch (s.type) {
+    case "once": return `一次性 ${fmtTime(s.at)}`;
+    case "interval": return `每 ${Math.round(s.seconds / 60)} 分钟`;
+    case "cron": return `Cron ${s.expression}`;
+    case "daily": return `每天 ${String(s.hour).padStart(2, "0")}:${String(s.minute).padStart(2, "0")}`;
+    case "weekly": {
+      const days = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+      return `每周${days[s.weekday] || s.weekday} ${String(s.hour).padStart(2, "0")}:${String(s.minute).padStart(2, "0")}`;
+    }
+    default: return s.type;
+  }
+}
+
+function renderWorkflows(wfs) {
+  $("#workflow-body").innerHTML = wfs.map((w) => `<tr>
+    <td>${w.enable ? pill("enabled") : pill("disabled")}</td>
+    <td><a href="#" class="wf-link" data-wf-id="${w.id}">${w.name}</a></td>
+    <td>${scheduleLabel(w.schedule)}</td>
+    <td>${w.next_run_at ? fmtTime(w.next_run_at) : "-"}</td>
+    <td>${w.task_ids.length}</td>
+    <td>${w.target}</td>
+    <td>${w.last_run_status ? pill(w.last_run_status) : "-"}</td>
+    <td class="actions">
+      <button class="ghost" data-wf-trigger="${w.id}">触发</button>
+      <button class="danger" data-wf-del="${w.id}">删除</button>
+    </td>
+  </tr>`).join("");
+}
+
+function renderTaskPicker(tasks) {
+  const list = $("#task-picker-list");
+  if (!list) return;
+  list.innerHTML = tasks.map((t) =>
+    `<label class="chk-row"><input type="checkbox" name="wf_task" value="${t.id}" /> ${t.name} <span class="mono">${t.filename}</span></label>`
+  ).join("") || `<div class="hint">暂无任务，请先在「任务」页面创建。</div>`;
+}
+
+function renderNodePicker(nodes) {
+  const list = $("#node-picker-list");
+  if (!list) return;
+  const online = nodes.filter((n) => n.status !== "offline");
+  list.innerHTML = online.map((n) =>
+    `<label class="chk-row"><input type="checkbox" name="wf_node" value="${n.id}" /> ${n.hostname} <span class="mono">${n.platform}</span></label>`
+  ).join("") || `<div class="hint">暂无在线节点。</div>`;
+}
+
+function buildScheduleFromForm(fd) {
+  const type = fd.get("schedule_type");
+  switch (type) {
+    case "once": {
+      const at = fd.get("once_at");
+      if (!at) throw new Error("请选择执行时间");
+      return { type: "once", at: new Date(at).toISOString() };
+    }
+    case "interval": {
+      const mins = Number(fd.get("interval_minutes") || 60);
+      return { type: "interval", seconds: mins * 60 };
+    }
+    case "daily": {
+      const t = fd.get("daily_time") || "02:00";
+      const [h, m] = t.split(":").map(Number);
+      return { type: "daily", hour: h, minute: m };
+    }
+    case "weekly": {
+      const day = Number(fd.get("weekly_day") || 1);
+      const t = fd.get("weekly_time") || "02:00";
+      const [h, m] = t.split(":").map(Number);
+      return { type: "weekly", weekday: day, hour: h, minute: m };
+    }
+    case "cron": {
+      const expr = fd.get("cron_expr")?.trim();
+      if (!expr) throw new Error("请输入 Cron 表达式");
+      return { type: "cron", expression: expr };
+    }
+    default:
+      throw new Error("未知定时规则类型");
+  }
+}
+
+async function renderWorkflowDetail(wfId) {
+  try {
+    const [wf, runs] = await Promise.all([
+      api(`/api/v1/workflows/${wfId}`),
+      api(`/api/v1/workflows/${wfId}/runs`),
+    ]);
+    currentWorkflowId = wfId;
+    $("#wf-detail-name").textContent = wf.name;
+    $("#wf-detail-meta").innerHTML = `
+      <div><b>状态：</b>${wf.enable ? "启用" : "禁用"}</div>
+      <div><b>定时规则：</b>${scheduleLabel(wf.schedule)}</div>
+      <div><b>下次执行：</b>${wf.next_run_at ? fmtTime(wf.next_run_at) : "-"}</div>
+      <div><b>上次执行：</b>${wf.last_run_at ? fmtTime(wf.last_run_at) : "-"} ${wf.last_run_status ? pill(wf.last_run_status) : ""}</div>
+      <div><b>节点策略：</b>${wf.target}${wf.target === "nodes" && wf.node_ids.length ? ` (${wf.node_ids.length} 个)` : ""}</div>
+      <div><b>创建时间：</b>${fmtTime(wf.created_at)}</div>
+    `;
+    const taskNames = wf.task_ids.map((id) => {
+      const t = cachedTasks.find((x) => x.id === id);
+      return t ? t.name : id.substring(0, 8);
+    });
+    $("#wf-detail-tasks").innerHTML = taskNames.map((n, i) =>
+      `<div class="row-item"><span class="mono">${i + 1}.</span> ${n}</div>`
+    ).join("") || `<div class="hint">无任务</div>`;
+    $("#wf-detail-runs").innerHTML = runs.map((r) => `<tr>
+      <td>${fmtTime(r.triggered_at)}</td>
+      <td>${pill(r.status)}</td>
+      <td>${r.task_count}</td>
+      <td>${r.success_count}</td>
+      <td>${r.failed_count}</td>
+    </tr>`).join("") || `<tr><td colspan="5" class="hint">暂无执行记录</td></tr>`;
+    switchView("workflow-detail");
+  } catch (e) {
+    alert("加载工作流详情失败: " + e.message);
+  }
+}
+
+// ==================== 记录 ====================
+function renderRuns(runs) {
+  $("#run-body").innerHTML = runs.map((r) => `<tr>
+    <td>${fmtTime(r.timestamp)}</td>
+    <td>${r.task_name}<div class="mono">${r.filename}</div></td>
+    <td class="mono">${r.node_id}</td>
+    <td>${pill(r.status)}</td>
+    <td>${fmtBytes(r.file_size)}</td>
+    <td>${fmtBytes(r.downloaded_bytes)}</td>
+    <td>${(r.elapsed_secs || 0).toFixed(1)}s</td>
+    <td>${(r.avg_speed_mbps || 0).toFixed(1)} MB/s</td>
+  </tr>`).join("");
+}
+
+// ==================== 下发 ====================
+function renderArtifacts(arts) {
+  $("#arts").innerHTML = arts.map((a) =>
+    `<div class="row-item"><span>${a.platform}</span><span class="mono">${a.filename}</span>${a.present ? pill("success") : pill("offline")}<span>${a.present ? fmtBytes(a.size) : "未放入"}</span></div>`
+  ).join("");
+}
+
+// ==================== 导航 ====================
+function switchView(view) {
+  currentView = view;
+  $$(".view").forEach((v) => v.classList.add("hidden"));
+  const el = $(`#view-${view}`);
+  if (el) el.classList.remove("hidden");
+  $$(".nav").forEach((b) => b.classList.toggle("on", b.dataset.view === view));
+  const titles = { dash: "总览", nodes: "节点", tasks: "任务", workflows: "调度", "workflow-detail": "工作流详情", runs: "记录", ship: "下发" };
+  $("#title").textContent = titles[view] || view;
+}
+
+// ==================== refresh ====================
 async function refresh() {
   $("#clock").textContent = new Date().toLocaleString();
   try {
-    const [ov, nodes, tasks, runs, arts, defaults] = await Promise.all([
+    const [ov, nodes, tasks, runs, arts, defaults, workflows] = await Promise.all([
       api("/api/v1/overview"),
       api("/api/v1/nodes"),
       api("/api/v1/tasks"),
-      api(" /api/v1/runs".trim()),
+      api("/api/v1/runs?limit=100"),
       api("/api/v1/artifacts"),
       api("/api/v1/defaults").catch(() => null),
+      api("/api/v1/workflows").catch(() => []),
     ]);
+    cachedTasks = tasks;
+    cachedNodes = nodes;
+    cachedWorkflows = workflows;
     if (defaults) applyDefaults(defaults);
     renderKpis(ov);
     $("#dash-nodes").innerHTML = (nodes.slice(0, 8).map((n) =>
@@ -115,46 +295,38 @@ async function refresh() {
     $("#dash-runs").innerHTML = (runs.slice(0, 8).map((r) =>
       `<div class="row-item"><span>${r.task_name}</span>${pill(r.status)}<span class="mono">${fmtBytes(r.downloaded_bytes)}</span></div>`
     ).join("")) || `<div class="hint">暂无运行记录。</div>`;
-
-    $("#node-body").innerHTML = nodes.map((n) => `<tr>
-      <td>${dot(n.status)}${pill(n.status)}</td>
-      <td>${n.hostname}<div class="mono">${n.id}</div></td>
-      <td>${n.platform} / ${n.arch}</td>
-      <td>${n.version}</td>
-      <td>${n.active_tasks}</td>
-      <td>${fmtBytes(n.bytes_downloaded)}</td>
-      <td>${fmtTime(n.last_seen)}</td>
-      <td class="actions"><button class="ghost" data-del-node="${n.id}">移除</button></td>
-    </tr>`).join("");
-
-    $("#task-body").innerHTML = tasks.map((t) => `<tr>
-      <td>${pill(t.status)}</td>
-      <td>${t.name}<div class="mono">${t.url}</div></td>
-      <td>${t.filename}</td>
-      <td>${t.target}${t.node_ids?.length ? ` (${t.node_ids.length})` : ""}</td>
-      <td>${fmtTime(t.created_at)}</td>
-      <td class="actions">
-        <button class="ghost" data-dispatch="${t.id}">下发</button>
-        <button class="ghost" data-cancel="${t.id}">取消</button>
-        <button class="danger" data-del-task="${t.id}">删除</button>
-      </td>
-    </tr>`).join("");
-
-    $("#run-body").innerHTML = runs.map((r) => `<tr>
-      <td>${fmtTime(r.timestamp)}</td>
-      <td>${r.task_name}<div class="mono">${r.filename}</div></td>
-      <td class="mono">${r.node_id}</td>
-      <td>${pill(r.status)}</td>
-      <td>${fmtBytes(r.file_size)}</td>
-      <td>${fmtBytes(r.downloaded_bytes)}</td>
-      <td>${(r.elapsed_secs || 0).toFixed(1)}s</td>
-      <td>${(r.avg_speed_mbps || 0).toFixed(1)} MB/s</td>
-    </tr>`).join("");
-
-    $("#arts").innerHTML = arts.map((a) =>
-      `<div class="row-item"><span>${a.platform}</span><span class="mono">${a.filename}</span>${a.present ? pill("success") : pill("offline")}<span>${a.present ? fmtBytes(a.size) : "未放入"}</span></div>`
-    ).join("");
-
+    renderNodes(nodes);
+    renderTasks(tasks);
+    renderWorkflows(workflows);
+    renderRuns(runs);
+    renderArtifacts(arts);
+    renderTaskPicker(tasks);
+    renderNodePicker(nodes);
+    // 如果当前在工作流详情页，刷新详情
+    if (currentView === "workflow-detail" && currentWorkflowId) {
+      try {
+        const [wf, wfRuns] = await Promise.all([
+          api(`/api/v1/workflows/${currentWorkflowId}`),
+          api(`/api/v1/workflows/${currentWorkflowId}/runs`),
+        ]);
+        $("#wf-detail-meta").innerHTML = `
+          <div><b>状态：</b>${wf.enable ? "启用" : "禁用"}</div>
+          <div><b>定时规则：</b>${scheduleLabel(wf.schedule)}</div>
+          <div><b>下次执行：</b>${wf.next_run_at ? fmtTime(wf.next_run_at) : "-"}</div>
+          <div><b>上次执行：</b>${wf.last_run_at ? fmtTime(wf.last_run_at) : "-"} ${wf.last_run_status ? pill(wf.last_run_status) : ""}</div>
+          <div><b>节点策略：</b>${wf.target}</div>
+          <div><b>创建时间：</b>${fmtTime(wf.created_at)}</div>
+        `;
+        $("#wf-detail-runs").innerHTML = wfRuns.map((r) => `<tr>
+          <td>${fmtTime(r.triggered_at)}</td>
+          <td>${pill(r.status)}</td>
+          <td>${r.task_count}</td>
+          <td>${r.success_count}</td>
+          <td>${r.failed_count}</td>
+        </tr>`).join("") || `<tr><td colspan="5" class="hint">暂无执行记录</td></tr>`;
+      } catch (_) {}
+    }
+    // 安装脚本提示
     const origin = location.origin;
     $("#install-hint").textContent =
 `# Linux / macOS
@@ -172,6 +344,14 @@ spde agent --master ${origin}`;
   }
 }
 
+// ==================== 事件监听 ====================
+
+// 导航
+$$(".nav").forEach((btn) => {
+  btn.addEventListener("click", () => switchView(btn.dataset.view));
+});
+
+// 通用点击（删除节点、删除任务、取消任务、触发工作流、删除工作流、工作流链接）
 document.addEventListener("click", async (e) => {
   const t = e.target;
   try {
@@ -184,10 +364,17 @@ document.addEventListener("click", async (e) => {
         ? `/api/v1/tasks/${t.dataset.delTask}?delete_file=true`
         : `/api/v1/tasks/${t.dataset.delTask}`;
       await api(url, { method: "DELETE" });
-    } else if (t.dataset.dispatch) {
-      await api(`/api/v1/tasks/${t.dataset.dispatch}/dispatch`, { method: "POST" });
     } else if (t.dataset.cancel) {
       await api(`/api/v1/tasks/${t.dataset.cancel}/cancel`, { method: "POST" });
+    } else if (t.dataset.wfTrigger) {
+      await api(`/api/v1/workflows/${t.dataset.wfTrigger}/trigger`, { method: "POST" });
+      alert("已触发");
+    } else if (t.dataset.wfDel) {
+      if (!confirm("确定删除此工作流？")) return;
+      await api(`/api/v1/workflows/${t.dataset.wfDel}`, { method: "DELETE" });
+    } else if (t.classList.contains("wf-link")) {
+      e.preventDefault();
+      renderWorkflowDetail(t.dataset.wfId);
     } else if (t.id === "purge-offline") {
       await api("/api/v1/nodes", { method: "DELETE" });
     } else {
@@ -199,53 +386,111 @@ document.addEventListener("click", async (e) => {
   }
 });
 
+// 任务表单提交
 $("#task-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
-  const node_ids = (fd.get("node_ids") || "")
-    .toString()
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  // 构建任务级参数覆盖（只填了的才传）
-  const overrides = {};
-  const num = (k) => {
-    const v = fd.get(k);
-    return v !== null && v.toString().trim() !== "" ? Number(v) : undefined;
-  };
-  const mc = num("max_concurrent"); if (mc !== undefined) overrides.max_concurrent = mc;
-  const cpf = num("connections_per_file"); if (cpf !== undefined) overrides.connections_per_file = cpf;
-  const rt = num("retry_times"); if (rt !== undefined) overrides.retry_times = rt;
-  const to = num("timeout"); if (to !== undefined) overrides.timeout = to;
-  const sp = fd.get("save_path")?.toString().trim(); if (sp) overrides.save_path = sp;
-  if (fd.get("skip_tls_verify") === "on") overrides.skip_tls_verify = true;
-  // 勾选"落盘"→ dry_run=false；不勾选→不传，用 config 默认值（默认 dry_run=true 不落盘）
-  if (fd.get("dry_run") === "on") overrides.dry_run = false;
-
+  if (!fd.get("name") || !fd.get("url") || !fd.get("filename")) {
+    alert("名称/URL/文件名必填");
+    return;
+  }
+  const overrides = buildOverridesFromForm(fd);
   try {
     await api("/api/v1/tasks", {
       method: "POST",
-      body: {
+      body: JSON.stringify({
         name: fd.get("name"),
         url: fd.get("url"),
         filename: fd.get("filename"),
-        enable: fd.get("enable") === "on",
-        dispatch_now: fd.get("dispatch_now") === "on",
-        target: fd.get("target"),
-        node_ids,
+        enable: fd.get("enable_init") !== "false",
         note: "",
         overrides,
-      },
+      }),
     });
     e.target.reset();
-    e.target.enable.checked = true;
-    e.target.dispatch_now.checked = true;
     refresh();
   } catch (err) {
     alert(err.message);
   }
 });
 
+// 定时规则类型切换
+$("#schedule-type")?.addEventListener("change", (e) => {
+  const type = e.target.value;
+  $$(".sch-field").forEach((el) => {
+    el.classList.toggle("hidden", el.dataset.sch !== type);
+  });
+});
+
+// 节点策略切换
+document.querySelector('[name="target"]')?.addEventListener("change", (e) => {
+  const wrap = $("#node-picker-wrap");
+  if (wrap) wrap.classList.toggle("hidden", e.target.value !== "nodes");
+});
+
+// 工作流表单提交
+$("#workflow-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const name = fd.get("name")?.toString().trim();
+  if (!name) { alert("工作流名称必填"); return; }
+  const taskIds = $$('[name="wf_task"]:checked').map((el) => el.value);
+  if (taskIds.length === 0) { alert("请至少选择一个任务"); return; }
+  const target = fd.get("target") || "any";
+  const nodeIds = target === "nodes" ? $$('[name="wf_node"]:checked').map((el) => el.value) : [];
+  try {
+    const schedule = buildScheduleFromForm(fd);
+    await api("/api/v1/workflows", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        enable: fd.get("enable_init") !== "false",
+        schedule,
+        task_ids: taskIds,
+        target,
+        node_ids: nodeIds,
+      }),
+    });
+    e.target.reset();
+    $$(".sch-field").forEach((el) => el.classList.toggle("hidden", el.dataset.sch !== "interval"));
+    $("#node-picker-wrap")?.classList.add("hidden");
+    refresh();
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+// 工作流详情页按钮
+$("#wf-back")?.addEventListener("click", () => switchView("workflows"));
+$("#wf-trigger")?.addEventListener("click", async () => {
+  if (!currentWorkflowId) return;
+  try {
+    await api(`/api/v1/workflows/${currentWorkflowId}/trigger`, { method: "POST" });
+    alert("已触发");
+    refresh();
+  } catch (e) { alert(e.message); }
+});
+$("#wf-toggle")?.addEventListener("click", async () => {
+  if (!currentWorkflowId) return;
+  try {
+    const wf = await api(`/api/v1/workflows/${currentWorkflowId}`);
+    await api(`/api/v1/workflows/${currentWorkflowId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enable: !wf.enable }),
+    });
+    refresh();
+  } catch (e) { alert(e.message); }
+});
+$("#wf-delete")?.addEventListener("click", async () => {
+  if (!currentWorkflowId) return;
+  if (!confirm("确定删除此工作流？")) return;
+  try {
+    await api(`/api/v1/workflows/${currentWorkflowId}`, { method: "DELETE" });
+    currentWorkflowId = null;
+    switchView("workflows");
+    refresh();
+  } catch (e) { alert(e.message); }
+});
+
 refresh();
-setInterval(refresh, 3000);
+setInterval(refresh, 5000);

@@ -116,3 +116,56 @@ code { font-family: ui-monospace, Consolas, monospace; }
   body { flex-direction: column; }
   .rail { width: 100%; flex: none; }
 }
+
+/* 工作流 / 调度页新增样式 */
+fieldset {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin: 10px 0;
+}
+fieldset legend {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 6px;
+}
+.check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow: auto;
+}
+.def-hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+.wf-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  font-size: 13px;
+}
+.wf-meta > div { padding: 4px 0; }
+.wf-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 550;
+}
+.wf-link:hover { text-decoration: underline; }
+button.primary {
+  background: var(--accent);
+  color: #062013;
+}
+.panel h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.pill.enabled { color: var(--accent); border-color: #2a5c40; }
+.pill.disabled { color: var(--muted); border-color: var(--line); }
+.pill.running { color: var(--busy); border-color: #2a445c; }
+.pill.success { color: var(--accent); border-color: #2a5c40; }
+.pill.failed { color: var(--bad); border-color: #5c2a28; }
+.pill.partial { color: var(--warn); border-color: #5c4a2a; }

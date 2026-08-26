@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pk::{api, web, AppState, PkConfig};
+use pk::{api, web, workflow_scheduler, AppState, PkConfig};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
@@ -57,6 +57,9 @@ async fn run_serve(config: Option<PathBuf>, listen: Option<String>) -> Result<()
     let state = AppState::open(cfg.clone(), work_root.clone()).await?;
     tracing::info!("work root {:?}", work_root);
     tracing::info!("data dir  {:?}", state.data_dir);
+
+    // 启动工作流后台调度器
+    workflow_scheduler::start(state.clone()).await;
 
     let app = api::router(state.clone());
     let app = web::mount(app);
