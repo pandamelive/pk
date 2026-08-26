@@ -148,7 +148,7 @@ pub fn claim_task(conn: &Connection, node_id: Uuid) -> Result<Option<NodeTask>> 
         )?;
 
         let dispatch_id: Uuid = did_str.parse()?;
-        let task_id: Uuid = tid_str.parse()?;
+        let _task_id: Uuid = tid_str.parse()?;
 
         // 获取任务详情
         let task = conn.query_row(
@@ -314,8 +314,6 @@ pub fn apply_report(conn: &Connection, req: &AgentReportReq) -> Result<RunRecord
         )?;
 
         // 更新关联的工作流运行记录
-        let mut stmt = conn.prepare("SELECT id, task_count, success_count, failed_count, workflow_id FROM workflow_runs WHERE dispatch_ids LIKE ?1")?;
-        // 注意：这里用 LIKE 可能不准确，应该用 JSON 包含查询。简化处理：遍历所有 running 的 workflow_runs
         let wfrs: Vec<(String, i64, i64, i64, String)> = conn
             .prepare("SELECT id, task_count, success_count, failed_count, workflow_id FROM workflow_runs WHERE status = 'running'")?
             .query_map([], |r| {
@@ -329,7 +327,6 @@ pub fn apply_report(conn: &Connection, req: &AgentReportReq) -> Result<RunRecord
             })?
             .filter_map(|r| r.ok())
             .collect();
-        drop(stmt);
 
         for (wr_id, task_count, mut success_count, mut failed_count, wf_id) in wfrs {
             // 检查这个 workflow_run 是否包含这个 dispatch_id

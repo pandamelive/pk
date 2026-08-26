@@ -1,7 +1,7 @@
 use crate::models::*;
 use crate::scheduler;
 use crate::store::AppState;
-use axum::extract::ws::{Message, Utf8Bytes, WebSocket};
+use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use chrono::Utc;
@@ -228,15 +228,14 @@ pub fn build_node_task_config(state: &AppState, node_task: &scheduler::NodeTask)
         http_proxy: defaults.http_proxy.clone(),
         https_proxy: defaults.https_proxy.clone(),
     };
-    if let Some(o) = &t.overrides {
-        if let Some(v) = o.max_concurrent { item.max_concurrent = v; }
-        if let Some(v) = o.connections_per_file { item.connections_per_file = v; }
-        if let Some(v) = o.retry_times { item.retry_times = v; }
-        if let Some(v) = o.timeout { item.timeout = v; }
-        if let Some(v) = o.skip_tls_verify { item.skip_tls_verify = v; }
-        if let Some(v) = o.dry_run { item.dry_run = v; }
-        if let Some(v) = o.save_path.clone() { item.save_path = v; }
-    }
+    let o = &t.overrides;
+    if let Some(v) = o.max_concurrent { item.max_concurrent = v; }
+    if let Some(v) = o.connections_per_file { item.connections_per_file = v; }
+    if let Some(v) = o.retry_times { item.retry_times = v; }
+    if let Some(v) = o.timeout { item.timeout = v; }
+    if let Some(v) = o.skip_tls_verify { item.skip_tls_verify = v; }
+    if let Some(v) = o.dry_run { item.dry_run = v; }
+    if let Some(v) = o.save_path.clone() { item.save_path = v; }
     NodeConfig {
         dispatch_id: node_task.dispatch_id,
         master: format!("http://127.0.0.1:{}", state.cfg.listen.split(':').last().unwrap_or("5566")),

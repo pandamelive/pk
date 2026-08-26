@@ -3,3 +3,6 @@ pk-controlcenter
 pk-data
 *.exe
 .DS_Store
+.idea/
+*.swp
+*.swo

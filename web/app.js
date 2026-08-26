@@ -19,7 +19,8 @@ async function api(path, opts = {}) {
     throw new Error(`${res.status} ${text || res.statusText}`);
   }
   if (res.status === 204) return null;
-  return res.json();
+  const json = await res.json();
+  return json.data !== undefined ? json.data : json;
 }
 
 const fmtBytes = (b) => {
@@ -357,7 +358,7 @@ async function refresh() {
       api("/api/v1/nodes"),
       api("/api/v1/tasks"),
       api("/api/v1/runs?limit=100"),
-      api("/api/v1/artifacts"),
+      api("/api/v1/artifacts").catch(() => []),
       api("/api/v1/defaults").catch(() => null),
       api("/api/v1/workflows").catch(() => []),
       api("/api/v1/dispatches").catch(() => []),

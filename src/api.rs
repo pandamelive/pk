@@ -1,4 +1,4 @@
-use crate::config::{PkConfig, SpdeDefaults};
+use crate::config::SpdeDefaults;
 use crate::models::*;
 use crate::scheduler;
 use crate::store::{artifact_filename, detect_host_platform, AppState};
@@ -12,7 +12,6 @@ use axum::Json;
 use chrono::Utc;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -266,17 +265,13 @@ pub async fn list_runs(
     let runs = state
         .with_conn(|conn| {
             let runs: Vec<RunRecord> = if let Some(nid) = q.node_id {
-                conn.query_map(
-                    "SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, file_size, downloaded_bytes, elapsed_secs, avg_speed_mbps, status, success_chunks, failed_chunks, error_msg, timestamp FROM runs WHERE node_id = ?1 ORDER BY timestamp DESC LIMIT ?2",
-                    params![nid.to_string(), q.limit],
-                    map_run,
-                )?.filter_map(|r| r.ok()).collect()
+                let mut stmt = conn.prepare("SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, file_size, downloaded_bytes, elapsed_secs, avg_speed_mbps, status, success_chunks, failed_chunks, error_msg, timestamp FROM runs WHERE node_id = ?1 ORDER BY timestamp DESC LIMIT ?2")?;
+                let rows: Vec<RunRecord> = stmt.query_map(params![nid.to_string(), q.limit], map_run)?.filter_map(|r| r.ok()).collect();
+                rows
             } else {
-                conn.query_map(
-                    "SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, file_size, downloaded_bytes, elapsed_secs, avg_speed_mbps, status, success_chunks, failed_chunks, error_msg, timestamp FROM runs ORDER BY timestamp DESC LIMIT ?1",
-                    params![q.limit],
-                    map_run,
-                )?.filter_map(|r| r.ok()).collect()
+                let mut stmt = conn.prepare("SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, file_size, downloaded_bytes, elapsed_secs, avg_speed_mbps, status, success_chunks, failed_chunks, error_msg, timestamp FROM runs ORDER BY timestamp DESC LIMIT ?1")?;
+                let rows: Vec<RunRecord> = stmt.query_map(params![q.limit], map_run)?.filter_map(|r| r.ok()).collect();
+                rows
             };
             Ok(runs)
         })
@@ -638,36 +633,7 @@ pub async fn list_dispatches(State(state): State<Arc<AppState>>) -> ApiResult<Ve
     Ok(Json(ApiResponse::ok(dispatches)))
 }
 
-// ── 静态文件 / 二进制分发 ─────────────────────────────────
-
-pub async fn serve_web(
-    State(state): State<Arc<AppState>>,
-    Path(path): Path<String>,
-) -> Response {
-    let safe_path = if path.is_empty() { "index.html".into() } else { path };
-    let web_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("web");
-    let file_path = web_dir.join(&safe_path);
-    if file_path.exists() && file_path.is_file() {
-        let content = tokio::fs::read(&file_path).await.unwrap_or_default();
-        let mime = match file_path.extension().and_then(|e| e.to_str()) {
-            Some("html") => "text/html; charset=utf-8",
-            Some("js") => "application/javascript; charset=utf-8",
-            Some("css") => "text/css; charset=utf-8",
-            Some("json") => "application/json",
-            Some("svg") => "image/svg+xml",
-            Some("png") => "image/png",
-            Some("ico") => "image/x-icon",
-            _ => "application/octet-stream",
-        };
-        ([("content-type", mime)], content).into_response()
-    } else {
-        (StatusCode::NOT_FOUND, "Not Found").into_response()
-    }
-}
+// ── 二进制分发 ─────────────────────────────────
 
 pub async fn serve_artifact(
     State(state): State<Arc<AppState>>,
@@ -697,10 +663,6 @@ pub async fn host_info() -> Json<ApiResponse<HostInfo>> {
 }
 
 // ── 路由 ──────────────────────────────────────────────────
-
-pub async fn serve_web_root(State(state): State<Arc<AppState>>) -> Response {
-    serve_web(State(state), Path("".into())).await
-}
 
 pub fn router(state: Arc<AppState>) -> axum::Router {
     use axum::routing::{delete, get, post, put};
@@ -733,8 +695,5 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/ws", get(ws::ws_handler))
         // 二进制分发
         .route("/api/v1/artifacts/{platform}", get(serve_artifact))
-        // 静态文件（兜底）
-        .route("/", get(serve_web_root))
-        .route("/{path}", get(serve_web))
         .with_state(state)
 }
