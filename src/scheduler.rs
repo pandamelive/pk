@@ -73,6 +73,19 @@ pub fn execute_workflow(snap: &mut Snapshot, wf: &Workflow) -> WorkflowRun {
     let mut dispatch_ids = Vec::new();
     let mut task_count = 0u32;
 
+    // 先清理这些任务之前卡住的 Pending/Acked dispatch（避免旧触发阻塞新触发）
+    // Running 状态的不取消，避免中断正在下载的任务
+    for &task_id in &wf.task_ids {
+        for d in snap.dispatches.iter_mut() {
+            if d.task_id == task_id
+                && matches!(d.state, DispatchState::Pending | DispatchState::Acked)
+            {
+                d.state = DispatchState::Cancelled;
+                d.updated_at = now;
+            }
+        }
+    }
+
     for &task_id in &wf.task_ids {
         let before = snap.dispatches.len();
         let n = dispatch_task_to(snap, task_id, &wf.target, &wf.node_ids);
