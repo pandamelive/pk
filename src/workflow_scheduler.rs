@@ -1,6 +1,7 @@
 use crate::models::*;
 use crate::scheduler::execute_workflow;
 use crate::store::AppState;
+use crate::ws;
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use cron::Schedule;
@@ -93,6 +94,9 @@ pub async fn trigger_workflow(state: &Arc<AppState>, wf_id: Uuid) -> Result<Opti
             run
         })
         .await?;
+
+    // 通知所有节点 config 已变更，让节点重新拉取任务列表
+    ws::notify_config_changed(state).await;
 
     Ok(Some(run))
 }

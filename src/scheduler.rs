@@ -183,6 +183,10 @@ pub fn apply_report(snap: &mut Snapshot, req: AgentReportReq) -> RunRecord {
                     } else {
                         "partial".into()
                     };
+                    // 同步更新工作流的 last_run_status
+                    if let Some(wf) = snap.workflows.iter_mut().find(|w| w.id == wr.workflow_id) {
+                        wf.last_run_status = Some(wr.status.clone());
+                    }
                 }
             }
         }
