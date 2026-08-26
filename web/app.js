@@ -71,7 +71,13 @@ function applyDefaults(d) {
   setPH("save_path", d.save_path);
   document.querySelectorAll(".def-hint").forEach((el) => {
     const key = el.dataset.def;
-    if (key in d) el.textContent = `（默认：${d[key] ? "开启" : "关闭"}）`;
+    if (key in d) {
+      if (key === "dry_run") {
+        el.textContent = `（默认：${d[key] ? "不落盘" : "落盘"}）`;
+      } else {
+        el.textContent = `（默认：${d[key] ? "开启" : "关闭"}）`;
+      }
+    }
   });
 }
 
@@ -214,7 +220,8 @@ $("#task-form").addEventListener("submit", async (e) => {
   const to = num("timeout"); if (to !== undefined) overrides.timeout = to;
   const sp = fd.get("save_path")?.toString().trim(); if (sp) overrides.save_path = sp;
   if (fd.get("skip_tls_verify") === "on") overrides.skip_tls_verify = true;
-  if (fd.get("dry_run") === "on") overrides.dry_run = true;
+  // 勾选"落盘"→ dry_run=false；不勾选→不传，用 config 默认值（默认 dry_run=true 不落盘）
+  if (fd.get("dry_run") === "on") overrides.dry_run = false;
 
   try {
     await api("/api/v1/tasks", {
