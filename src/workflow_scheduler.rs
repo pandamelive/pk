@@ -1,10 +1,11 @@
 use crate::models::*;
-use crate::scheduler::{self, execute_workflow};
+use crate::scheduler;
 use crate::store::AppState;
 use crate::ws;
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use cron::Schedule;
+use rusqlite::params;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::time::{self, Duration as TokioDuration};
@@ -24,19 +25,20 @@ pub async fn start(state: Arc<AppState>) {
         }
     });
 
-    // 超时回收：Running 任务节点超时未上报则回收到待下发池
+    // 超时回收 + 修复卡住的工作流运行记录
     tokio::spawn(async move {
         let mut interval = time::interval(TokioDuration::from_secs(60));
         loop {
             interval.tick().await;
             if let Err(e) = state
-                .with_mut(|snap| {
-                    scheduler::reclaim_timeout_tasks(snap, 180); // 3分钟超时回收
-                    scheduler::fix_stuck_workflow_runs(snap); // 修复卡住的工作流运行记录
+                .with_transaction(|conn| {
+                    scheduler::reclaim_timeout_tasks(conn, 180)?; // 3分钟超时回收
+                    scheduler::fix_stuck_workflow_runs(conn)?;
+                    Ok(())
                 })
                 .await
             {
-                tracing::warn!("reclaim timeout tasks error: {}", e);
+                tracing::warn!("reclaim/fix error: {}", e);
             }
         }
     });
@@ -45,36 +47,28 @@ pub async fn start(state: Arc<AppState>) {
 /// 扫描所有启用的工作流，到点则触发执行
 async fn scan_and_trigger(state: &Arc<AppState>) -> Result<()> {
     let now = Utc::now();
-    let mut to_trigger: Vec<Uuid> = Vec::new();
-    let mut need_init: Vec<Uuid> = Vec::new();
-
-    {
-        let snap = state.snapshot().await;
-        for wf in &snap.workflows {
-            if !wf.enable {
-                continue;
-            }
-            match wf.next_run_at {
-                Some(next_time) if next_time <= now => to_trigger.push(wf.id),
-                None => need_init.push(wf.id), // 异常情况：启用但没有 next_run_at
-                _ => {}
-            }
-        }
-    }
-
-    // 修复异常状态：启用但 next_run_at 为空，重新计算
-    if !need_init.is_empty() {
-        state
-            .with_mut(|snap| {
-                let now = Utc::now();
-                for id in &need_init {
-                    if let Some(wf) = snap.workflows.iter_mut().find(|w| w.id == *id) {
-                        wf.next_run_at = compute_next_run(&wf.schedule, wf.last_run_at, now);
-                    }
-                }
-            })
-            .await?;
-    }
+    let to_trigger: Vec<Uuid> = state
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT id, next_run_at FROM workflows WHERE enable = 1")?;
+            let ids: Vec<Uuid> = stmt
+                .query_map([], |r| {
+                    let id_str: String = r.get(0)?;
+                    let next_str: Option<String> = r.get(1)?;
+                    Ok((id_str, next_str))
+                })?
+                .filter_map(|r| r.ok())
+                .filter(|(_, next_str)| {
+                    next_str
+                        .as_ref()
+                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&Utc) <= now)
+                        .unwrap_or(false)
+                })
+                .filter_map(|(id_str, _)| id_str.parse().ok())
+                .collect();
+            Ok(ids)
+        })
+        .await?;
 
     for wf_id in to_trigger {
         trigger_workflow(state, wf_id).await?;
@@ -85,32 +79,55 @@ async fn scan_and_trigger(state: &Arc<AppState>) -> Result<()> {
 
 /// 手动触发指定工作流
 pub async fn trigger_workflow(state: &Arc<AppState>, wf_id: Uuid) -> Result<Option<WorkflowRun>> {
-    let wf_clone = {
-        let snap = state.snapshot().await;
-        snap.workflows.iter().find(|w| w.id == wf_id).cloned()
-    };
+    let wf = state
+        .with_conn(|conn| {
+            let wf = conn.query_row(
+                "SELECT id, name, enable, schedule, task_ids, target, node_ids, next_run_at, last_run_at, last_run_status, created_at FROM workflows WHERE id = ?1",
+                params![wf_id.to_string()],
+                |r| {
+                    let schedule_str: String = r.get(3)?;
+                    let task_ids_str: String = r.get(4)?;
+                    let target_str: String = r.get(5)?;
+                    let node_ids_str: String = r.get(6)?;
+                    Ok(Workflow {
+                        id: r.get::<_, String>(0)?.parse().unwrap(),
+                        name: r.get(1)?,
+                        enable: r.get::<_, i64>(2)? != 0,
+                        schedule: serde_json::from_str(&schedule_str).unwrap_or(WorkflowSchedule::Once { at: Utc::now() }),
+                        task_ids: serde_json::from_str(&task_ids_str).unwrap_or_default(),
+                        target: serde_json::from_str(&target_str).unwrap_or_default(),
+                        node_ids: serde_json::from_str(&node_ids_str).unwrap_or_default(),
+                        next_run_at: r.get::<_, Option<String>>(7)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+                        last_run_at: r.get::<_, Option<String>>(8)?.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+                        last_run_status: r.get(9)?,
+                        created_at: DateTime::parse_from_rfc3339(&r.get::<_, String>(10)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
+                    })
+                },
+            );
+            Ok(wf.ok())
+        })
+        .await?;
 
-    let Some(wf) = wf_clone else {
+    let Some(wf) = wf else {
         return Ok(None);
     };
 
     let now = Utc::now();
     let run = state
-        .with_mut(|snap| {
-            let run = execute_workflow(snap, &wf);
+        .with_transaction(|conn| {
+            let run = scheduler::execute_workflow(conn, &wf)?;
             // 更新工作流的最后执行信息和下次执行时间
-            if let Some(w) = snap.workflows.iter_mut().find(|w| w.id == wf.id) {
-                w.last_run_at = Some(now);
-                w.last_run_status = Some(run.status.clone());
-                w.next_run_at = compute_next_run(&wf.schedule, Some(now), now);
-            }
-            snap.workflow_runs.push(run.clone());
-            // 限制运行记录数量，保留最近 500 条
-            if snap.workflow_runs.len() > 500 {
-                let drain_to = snap.workflow_runs.len() - 500;
-                snap.workflow_runs.drain(0..drain_to);
-            }
-            run
+            let next_run = compute_next_run(&wf.schedule, Some(now), now);
+            conn.execute(
+                "UPDATE workflows SET last_run_at = ?1, last_run_status = ?2, next_run_at = ?3 WHERE id = ?4",
+                params![
+                    now.to_rfc3339(),
+                    run.status.clone(),
+                    next_run.map(|t| t.to_rfc3339()),
+                    wf.id.to_string(),
+                ],
+            )?;
+            Ok(run)
         })
         .await?;
 
@@ -144,15 +161,11 @@ pub fn compute_next_run(
                 Some(next)
             }
         }
-        WorkflowSchedule::Cron { expression } => {
-            match Schedule::from_str(expression) {
-                Ok(sched) => sched.upcoming(Utc).next(),
-                Err(_) => None,
-            }
-        }
-        WorkflowSchedule::Daily { hour, minute } => {
-            next_daily(now, *hour, *minute)
-        }
+        WorkflowSchedule::Cron { expression } => match Schedule::from_str(expression) {
+            Ok(sched) => sched.upcoming(Utc).next(),
+            Err(_) => None,
+        },
+        WorkflowSchedule::Daily { hour, minute } => next_daily(now, *hour, *minute),
         WorkflowSchedule::Weekly {
             weekday,
             hour,

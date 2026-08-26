@@ -232,6 +232,64 @@ pub struct UpdateWorkflowReq {
     pub node_ids: Option<Vec<Uuid>>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTaskReq {
+    pub name: Option<String>,
+    pub url: Option<String>,
+    pub filename: Option<String>,
+    pub enable: Option<bool>,
+    pub note: Option<String>,
+    pub overrides: Option<TaskOverrides>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentFetchReq {
+    pub node_id: Uuid,
+    #[serde(default)]
+    pub hostname: Option<String>,
+}
+
+/// 下发给节点的单个下载任务配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskItem {
+    pub url: String,
+    pub filename: String,
+    pub save_path: String,
+    pub max_concurrent: u32,
+    pub connections_per_file: u32,
+    pub retry_times: u32,
+    pub timeout: u64,
+    pub dry_run: bool,
+    pub skip_tls_verify: bool,
+    pub resume: bool,
+    #[serde(default)]
+    pub http_proxy: String,
+    #[serde(default)]
+    pub https_proxy: String,
+}
+
+/// 节点领取任务后返回的完整配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeConfig {
+    pub dispatch_id: Uuid,
+    pub master: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    pub tasks: Vec<TaskItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowDetail {
+    pub workflow: Workflow,
+    pub runs: Vec<WorkflowRun>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HostInfo {
+    pub platform: String,
+    pub arch: String,
+}
+
 fn default_true() -> bool {
     true
 }

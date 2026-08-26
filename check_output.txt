@@ -1,0 +1,452 @@
+﻿cargo.exe :     Checking pk v0.4.1 (Z:\vs\pk)
+At line:1 char:10286
++ ... d Z:\vs\pk; & "C:\Users\Administrator\.cargo\bin\cargo.exe" check 2>& ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checking pk v0.4.1 (Z:\vs\pk):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0425]: cannot find type `UpdateTaskReq` in this scope
+   --> src\api.rs:192:21
+    |
+192 |     Json(req): Json<UpdateTaskReq>,
+    |                     ^^^^^^^^^^^^^
+    |
+   ::: src\models.rs:200:1
+    |
+200 | pub struct CreateTaskReq {
+    | ------------------------ similarly named struct `CreateTaskReq` defined here
+    |
+help: a struct with a similar name exists
+    |
+192 -     Json(req): Json<UpdateTaskReq>,
+192 +     Json(req): Json<CreateTaskReq>,
+    |
+help: you might be missing a type parameter
+    |
+189 | pub async fn update_task<UpdateTaskReq>(
+    |                         +++++++++++++++
+
+error[E0425]: cannot find type `SpdeDefaults` in this scope
+   --> src\api.rs:312:76
+    |
+312 | pub async fn get_defaults(State(state): State<Arc<AppState>>) -> ApiResult<SpdeDefaults> {
+    |                                                                            ^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+  1 + use crate::config::SpdeDefaults;
+    |
+
+error[E0425]: cannot find type `AgentFetchReq` in this scope
+   --> src\api.rs:348:21
+    |
+348 |     Json(req): Json<AgentFetchReq>,
+    |                     ^^^^^^^^^^^^^ not found in this scope
+    |
+help: you might be missing a type parameter
+    |
+346 | pub async fn agent_fetch_config<AgentFetchReq>(
+    |                                +++++++++++++++
+
+error[E0425]: cannot find type `NodeConfig` in this scope
+   --> src\api.rs:349:16
+    |
+349 | ) -> ApiResult<NodeConfig> {
+    |                ^^^^^^^^^^ not found in this scope
+    |
+help: you might be missing a type parameter
+    |
+346 | pub async fn agent_fetch_config<NodeConfig>(
+    |                                ++++++++++++
+
+error[E0422]: cannot find struct, variant or union type `NodeConfig` in this scope
+   --> src\api.rs:370:15
+    |
+370 |     let cfg = NodeConfig {
+    |               ^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find type `WorkflowDetail` in this scope
+   --> src\api.rs:543:16
+    |
+543 | ) -> ApiResult<WorkflowDetail> {
+    |                ^^^^^^^^^^^^^^ not found in this scope
+    |
+help: you might be missing a type parameter
+    |
+540 | pub async fn get_workflow<WorkflowDetail>(
+    |                          ++++++++++++++++
+
+error[E0422]: cannot find struct, variant or union type `WorkflowDetail` in this scope
+   --> src\api.rs:564:29
+    |
+564 |     Ok(Json(ApiResponse::ok(WorkflowDetail { workflow: wf, runs })))
+    |                             ^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find type `HostInfo` in this scope
+   --> src\api.rs:690:46
+    |
+690 | pub async fn host_info() -> Json<ApiResponse<HostInfo>> {
+    |                                              ^^^^^^^^ not found in this scope
+    |
+help: you might be missing a type parameter
+    |
+690 | pub async fn host_info<HostInfo>() -> Json<ApiResponse<HostInfo>> {
+    |                       ++++++++++
+
+error[E0422]: cannot find struct, variant or union type `HostInfo` in this scope
+   --> src\api.rs:692:26
+    |
+692 |     Json(ApiResponse::ok(HostInfo { platform, arch }))
+    |                          ^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find type `NodeConfig` in this scope
+   --> src\ws.rs:213:85
+    |
+ 46 | pub struct NodeConn {
+    | ------------------- similarly named struct `NodeConn` defined here
+...
+213 | pub fn build_node_task_config(state: &AppState, node_task: &scheduler::NodeTask) -> NodeConfig {
+    |                                                                                     ^^^^^^^^^^
+    |
+help: a struct with a similar name exists
+    |
+213 - pub fn build_node_task_config(state: &AppState, node_task: &scheduler::NodeTask) -> NodeConfig {
+213 + pub fn build_node_task_config(state: &AppState, node_task: &scheduler::NodeTask) -> NodeConn {
+    |
+
+error[E0422]: cannot find struct, variant or union type `TaskItem` in this scope
+   --> src\ws.rs:216:20
+    |
+216 |     let mut item = TaskItem {
+    |                    ^^^^^^^^ not found in this scope
+
+error[E0422]: cannot find struct, variant or union type `NodeConfig` in this scope
+   --> src\ws.rs:236:5
+    |
+ 46 | pub struct NodeConn {
+    | ------------------- similarly named struct `NodeConn` defined here
+...
+236 |     NodeConfig {
+    |     ^^^^^^^^^^
+    |
+help: a struct with a similar name exists
+    |
+236 -     NodeConfig {
+236 +     NodeConn {
+    |
+
+warning: unused import: `crate::config::PkConfig`
+ --> src\api.rs:1:5
+  |
+1 | use crate::config::PkConfig;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::models::*`
+ --> src\ws.rs:1:5
+  |
+1 | use crate::models::*;
+  |     ^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `unwrap_or` found for type `bool` in the current scope
+   --> src\api.rs:163:28
+    |
+163 |         enable: req.enable.unwrap_or(true),
+    |                            ^^^^^^^^^ method not found in `bool`
+
+error[E0597]: `stmt` does not live long enough
+   --> src\api.rs:272:17
+    |
+271 |                 let mut stmt = conn.prepare("SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, 
+file_size, downloa...
+    |                     -------- binding `stmt` declared here
+272 |                 stmt.query_map(params![nid.to_string(), q.limit], map_run)?.filter_map(|r| r.ok()).collect()
+    |                 ^^^^-------------------------------------------------------
+    |                 |
+    |                 borrowed value does not live long enough
+    |                 a temporary with access to the borrow is created here ...
+273 |             } else {
+    |             -
+    |             |
+    |             `stmt` dropped here while still borrowed
+    |             ... and the borrow might be used here, when that temporary is dropped and runs the destructor for typ
+e `ControlFlow<Result<Infallible, rusqlite::Error>, MappedRows<'_, for<'a, 'b> fn(&'a Row<'b>) -> Result<models::RunRec
+ord, rusqlite::Error> {map_run}>>`
+    |
+    = note: the temporary is part of an expression at the end of a block;
+            consider forcing this temporary to be dropped sooner, before the block's local variables are dropped
+help: for example, you could save the expression's value in a new local variable `x` and then make `x` be the expressio
+n at the end of the block
+    |
+272 |                 let x = stmt.query_map(params![nid.to_string(), q.limit], map_run)?.filter_map(|r| r.ok()).collec
+t(); x
+    |                 +++++++                                                                                          
+   +++
+
+error[E0597]: `stmt` does not live long enough
+   --> src\api.rs:275:17
+    |
+274 |                 let mut stmt = conn.prepare("SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, 
+file_size, downloa...
+    |                     -------- binding `stmt` declared here
+275 |                 stmt.query_map(params![q.limit], map_run)?.filter_map(|r| r.ok()).collect()
+    |                 ^^^^--------------------------------------
+    |                 |
+    |                 borrowed value does not live long enough
+    |                 a temporary with access to the borrow is created here ...
+276 |             };
+    |             -
+    |             |
+    |             `stmt` dropped here while still borrowed
+    |             ... and the borrow might be used here, when that temporary is dropped and runs the destructor for typ
+e `ControlFlow<Result<Infallible, rusqlite::Error>, MappedRows<'_, for<'a, 'b> fn(&'a Row<'b>) -> Result<models::RunRec
+ord, rusqlite::Error> {map_run}>>`
+    |
+    = note: the temporary is part of an expression at the end of a block;
+            consider forcing this temporary to be dropped sooner, before the block's local variables are dropped
+help: for example, you could save the expression's value in a new local variable `x` and then make `x` be the expressio
+n at the end of the block
+    |
+275 |                 let x = stmt.query_map(params![q.limit], map_run)?.filter_map(|r| r.ok()).collect(); x
+    |                 +++++++                                                                            +++
+
+error[E0609]: no field `hostname` on type `models::AgentHeartbeatReq`
+   --> src\api.rs:337:58
+    |
+337 | ...   params![req.node_id.to_string(), req.hostname.clone().unwrap_or_else(|| "unknown".into()), now.to_rfc3339()
+, req.active_tasks...
+    |                                            ^^^^^^^^ unknown field
+    |
+    = note: available fields are: `node_id`, `active_tasks`, `bytes_downloaded`, `last_error`, `busy`
+
+error[E0599]: `std::string::String` is not an iterator
+   --> src\api.rs:373:40
+    |
+373 |         token: state.cfg.token.clone().filter(|s| !s.is_empty()),
+    |                                        ^^^^^^ `std::string::String` is not an iterator
+    |
+   ::: C:\Users\Administrator\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\s
+tring.rs:353:1
+    |
+353 | pub struct String {
+    | ----------------- doesn't satisfy `std::string::String: Iterator`
+    |
+    = note: the following trait bounds were not satisfied:
+            `std::string::String: Iterator`
+            which is required by `&mut std::string::String: Iterator`
+            `str: Iterator`
+            which is required by `&mut str: Iterator`
+
+error[E0599]: no associated function or constant named `Task` found for struct `models::AgentClaimResp` in the current 
+scope
+   --> src\api.rs:401:67
+    |
+401 |             (StatusCode::OK, Json(ApiResponse::ok(AgentClaimResp::Task(cfg)))).into_response()
+    |                                                                   ^^^^ associated function or constant not found 
+in `models::AgentClaimResp`
+    |
+   ::: src\models.rs:305:1
+    |
+305 | pub struct AgentClaimResp {
+    | ------------------------- associated function or constant `Task` not found for this struct
+
+error[E0599]: no method named `unwrap_or` found for type `bool` in the current scope
+   --> src\api.rs:455:28
+    |
+455 |         enable: req.enable.unwrap_or(true),
+    |                            ^^^^^^^^^ method not found in `bool`
+
+error[E0599]: no method named `unwrap_or` found for enum `models::AssignmentTarget` in the current scope
+   --> src\api.rs:458:28
+    |
+458 |         target: req.target.unwrap_or(AssignmentTarget::Any),
+    |                            ^^^^^^^^^ method not found in `models::AssignmentTarget`
+    |
+   ::: src\models.rs:26:1
+    |
+ 26 | pub enum AssignmentTarget {
+    | ------------------------- method `unwrap_or` not found for this enum
+
+error[E0599]: no method named `unwrap_or_default` found for struct `Vec<Uuid>` in the current scope
+   --> src\api.rs:459:32
+    |
+459 |         node_ids: req.node_ids.unwrap_or_default(),
+    |                                ^^^^^^^^^^^^^^^^^ method not found in `Vec<Uuid>`
+
+error[E0308]: mismatched types
+   --> src\ws.rs:85:49
+    |
+ 85 |                 let _ = c.tx.send(Message::Text(text.clone()));
+    |                                   ------------- ^^^^^^^^^^^^ expected `Utf8Bytes`, found `String`
+    |                                   |
+    |                                   arguments to this enum variant are incorrect
+    |
+note: tuple variant defined here
+   --> C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\axum-0.8.9\src\extract\ws.rs:774:5
+    |
+774 |     Text(Utf8Bytes),
+    |     ^^^^
+help: call `Into::into` on this expression to convert `std::string::String` into `Utf8Bytes`
+    |
+ 85 |                 let _ = c.tx.send(Message::Text(text.clone().into()));
+    |                                                             +++++++
+
+error[E0433]: cannot find type `Utc` in this scope
+   --> src\ws.rs:163:23
+    |
+163 |             let now = Utc::now();
+    |                       ^^^ use of undeclared type `Utc`
+
+error[E0433]: cannot find type `Utc` in this scope
+   --> src\ws.rs:195:23
+    |
+195 |             let now = Utc::now();
+    |                       ^^^ use of undeclared type `Utc`
+
+error[E0308]: mismatched types
+  --> src\api.rs:68:12
+   |
+68 |     if let Some(expected) = &state.cfg.token {
+   |            ^^^^^^^^^^^^^^   ---------------- this expression has type `&std::string::String`
+   |            |
+   |            expected `String`, found `Option<_>`
+   |
+   = note: expected struct `std::string::String`
+                found enum `std::option::Option<_>`
+
+error[E0609]: no field `chunk_size` on type `&SpdeDefaults`
+   --> src\ws.rs:225:30
+    |
+225 |         chunk_size: defaults.chunk_size,
+    |                              ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `max_concurrent`, `resume`, `retry_times`, `timeout`, `skip_tls_verify` ... and 5 oth
+ers
+
+error[E0609]: no field `verify_checksum` on type `&SpdeDefaults`
+   --> src\ws.rs:226:35
+    |
+226 |         verify_checksum: defaults.verify_checksum,
+    |                                   ^^^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `max_concurrent`, `resume`, `retry_times`, `timeout`, `skip_tls_verify` ... and 5 oth
+ers
+
+error[E0609]: no field `skip_existing` on type `&SpdeDefaults`
+   --> src\ws.rs:227:33
+    |
+227 |         skip_existing: defaults.skip_existing,
+    |                                 ^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `max_concurrent`, `resume`, `retry_times`, `timeout`, `skip_tls_verify` ... and 5 oth
+ers
+
+error[E0609]: no field `user_agent` on type `&SpdeDefaults`
+   --> src\ws.rs:228:30
+    |
+228 |         user_agent: defaults.user_agent.clone(),
+    |                              ^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `max_concurrent`, `resume`, `retry_times`, `timeout`, `skip_tls_verify` ... and 5 oth
+ers
+
+error[E0609]: no field `extra_headers` on type `&SpdeDefaults`
+   --> src\ws.rs:229:33
+    |
+229 |         extra_headers: defaults.extra_headers.clone(),
+    |                                 ^^^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `max_concurrent`, `resume`, `retry_times`, `timeout`, `skip_tls_verify` ... and 5 oth
+ers
+
+error[E0609]: no field `proxy` on type `&SpdeDefaults`
+   --> src\ws.rs:230:25
+    |
+230 |         proxy: defaults.proxy.clone(),
+    |                         ^^^^^ unknown field
+    |
+    = note: available fields are: `max_concurrent`, `resume`, `retry_times`, `timeout`, `skip_tls_verify` ... and 5 oth
+ers
+
+error[E0609]: no field `speed_limit` on type `&SpdeDefaults`
+   --> src\ws.rs:231:31
+    |
+231 |         speed_limit: defaults.speed_limit,
+    |                               ^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `max_concurrent`, `resume`, `retry_times`, `timeout`, `skip_tls_verify` ... and 5 oth
+ers
+
+error[E0308]: mismatched types
+   --> src\ws.rs:233:12
+    |
+233 |     if let Some(o) = &t.overrides {
+    |            ^^^^^^^   ------------ this expression has type `&TaskOverrides`
+    |            |
+    |            expected `TaskOverrides`, found `Option<_>`
+    |
+    = note: expected struct `TaskOverrides`
+                 found enum `std::option::Option<_>`
+
+error[E0599]: the method `filter` exists for struct `std::string::String`, but its trait bounds were not satisfied
+   --> src\ws.rs:239:40
+    |
+239 |         token: state.cfg.token.clone().filter(|s| !s.is_empty()),
+    |                                        ^^^^^^ method cannot be called on `std::string::String` due to unsatisfied
+ trait bounds
+    |
+   ::: C:\Users\Administrator\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\s
+tring.rs:353:1
+    |
+353 | pub struct String {
+    | ----------------- doesn't satisfy `std::string::String: Iterator`, `std::string::String: StreamExt` or `std::stri
+ng::String: Stream`
+    |
+    = note: the following trait bounds were not satisfied:
+            `std::string::String: Stream`
+            which is required by `std::string::String: StreamExt`
+            `&std::string::String: Stream`
+            which is required by `&std::string::String: StreamExt`
+            `&mut std::string::String: Stream`
+            which is required by `&mut std::string::String: StreamExt`
+            `std::string::String: Iterator`
+            which is required by `&mut std::string::String: Iterator`
+            `str: Stream`
+            which is required by `str: StreamExt`
+            `&str: Stream`
+            which is required by `&str: StreamExt`
+            `&mut str: Stream`
+            which is required by `&mut str: StreamExt`
+            `str: Iterator`
+            which is required by `&mut str: Iterator`
+
+warning: unused variable: `state`
+   --> src\api.rs:640:11
+    |
+640 |     State(state): State<Arc<AppState>>,
+    |           ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `task_id`
+   --> src\scheduler.rs:151:13
+    |
+151 |         let task_id: Uuid = tid_str.parse()?;
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_task_id`
+
+warning: variable does not need to be mutable
+   --> src\scheduler.rs:317:13
+    |
+317 | ...   let mut stmt = conn.prepare("SELECT id, task_count, success_count, failed_count, workflow_id FROM workflow_
+runs WHERE dispatc...
+    |           ----^^^^
+    |           |
+    |           help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0308, E0422, E0425, E0433, E0597, E0599, E0609.
+For more information about an error, try `rustc --explain E0308`.
+warning: `pk` (lib) generated 5 warnings
+error: could not compile `pk` (lib) due to 34 previous errors; 5 warnings emitted

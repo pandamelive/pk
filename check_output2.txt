@@ -1,0 +1,193 @@
+﻿cargo.exe :     Checking pk v0.4.1 (Z:\vs\pk)
+At line:1 char:10286
++ ... d Z:\vs\pk; & "C:\Users\Administrator\.cargo\bin\cargo.exe" check 2>& ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checking pk v0.4.1 (Z:\vs\pk):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0425]: cannot find type `SpdeDefaults` in this scope
+   --> src\api.rs:312:76
+    |
+312 | pub async fn get_defaults(State(state): State<Arc<AppState>>) -> ApiResult<SpdeDefaults> {
+    |                                                                            ^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+  1 + use crate::config::SpdeDefaults;
+    |
+
+warning: unused import: `crate::config::PkConfig`
+ --> src\api.rs:1:5
+  |
+1 | use crate::config::PkConfig;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: no method named `unwrap_or` found for type `bool` in the current scope
+   --> src\api.rs:163:28
+    |
+163 |         enable: req.enable.unwrap_or(true),
+    |                            ^^^^^^^^^ method not found in `bool`
+
+error[E0597]: `stmt` does not live long enough
+   --> src\api.rs:272:17
+    |
+271 |                 let mut stmt = conn.prepare("SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, 
+file_size, downloa...
+    |                     -------- binding `stmt` declared here
+272 |                 stmt.query_map(params![nid.to_string(), q.limit], map_run)?.filter_map(|r| r.ok()).collect()
+    |                 ^^^^-------------------------------------------------------
+    |                 |
+    |                 borrowed value does not live long enough
+    |                 a temporary with access to the borrow is created here ...
+273 |             } else {
+    |             -
+    |             |
+    |             `stmt` dropped here while still borrowed
+    |             ... and the borrow might be used here, when that temporary is dropped and runs the destructor for typ
+e `ControlFlow<Result<Infallible, rusqlite::Error>, MappedRows<'_, for<'a, 'b> fn(&'a Row<'b>) -> Result<models::RunRec
+ord, rusqlite::Error> {map_run}>>`
+    |
+    = note: the temporary is part of an expression at the end of a block;
+            consider forcing this temporary to be dropped sooner, before the block's local variables are dropped
+help: for example, you could save the expression's value in a new local variable `x` and then make `x` be the expressio
+n at the end of the block
+    |
+272 |                 let x = stmt.query_map(params![nid.to_string(), q.limit], map_run)?.filter_map(|r| r.ok()).collec
+t(); x
+    |                 +++++++                                                                                          
+   +++
+
+error[E0597]: `stmt` does not live long enough
+   --> src\api.rs:275:17
+    |
+274 |                 let mut stmt = conn.prepare("SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, 
+file_size, downloa...
+    |                     -------- binding `stmt` declared here
+275 |                 stmt.query_map(params![q.limit], map_run)?.filter_map(|r| r.ok()).collect()
+    |                 ^^^^--------------------------------------
+    |                 |
+    |                 borrowed value does not live long enough
+    |                 a temporary with access to the borrow is created here ...
+276 |             };
+    |             -
+    |             |
+    |             `stmt` dropped here while still borrowed
+    |             ... and the borrow might be used here, when that temporary is dropped and runs the destructor for typ
+e `ControlFlow<Result<Infallible, rusqlite::Error>, MappedRows<'_, for<'a, 'b> fn(&'a Row<'b>) -> Result<models::RunRec
+ord, rusqlite::Error> {map_run}>>`
+    |
+    = note: the temporary is part of an expression at the end of a block;
+            consider forcing this temporary to be dropped sooner, before the block's local variables are dropped
+help: for example, you could save the expression's value in a new local variable `x` and then make `x` be the expressio
+n at the end of the block
+    |
+275 |                 let x = stmt.query_map(params![q.limit], map_run)?.filter_map(|r| r.ok()).collect(); x
+    |                 +++++++                                                                            +++
+
+error[E0599]: `std::string::String` is not an iterator
+   --> src\api.rs:373:40
+    |
+373 |         token: state.cfg.token.clone().filter(|s| !s.is_empty()),
+    |                                        ^^^^^^ `std::string::String` is not an iterator
+    |
+   ::: C:\Users\Administrator\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\s
+tring.rs:353:1
+    |
+353 | pub struct String {
+    | ----------------- doesn't satisfy `std::string::String: Iterator`
+    |
+    = note: the following trait bounds were not satisfied:
+            `std::string::String: Iterator`
+            which is required by `&mut std::string::String: Iterator`
+            `str: Iterator`
+            which is required by `&mut str: Iterator`
+
+error[E0599]: no method named `unwrap_or` found for type `bool` in the current scope
+   --> src\api.rs:455:28
+    |
+455 |         enable: req.enable.unwrap_or(true),
+    |                            ^^^^^^^^^ method not found in `bool`
+
+error[E0308]: mismatched types
+   --> src\ws.rs:85:49
+    |
+ 85 |                 let _ = c.tx.send(Message::Text(text.clone()));
+    |                                   ------------- ^^^^^^^^^^^^ expected `Utf8Bytes`, found `String`
+    |                                   |
+    |                                   arguments to this enum variant are incorrect
+    |
+note: tuple variant defined here
+   --> C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\axum-0.8.9\src\extract\ws.rs:774:5
+    |
+774 |     Text(Utf8Bytes),
+    |     ^^^^
+help: call `Into::into` on this expression to convert `std::string::String` into `Utf8Bytes`
+    |
+ 85 |                 let _ = c.tx.send(Message::Text(text.clone().into()));
+    |                                                             +++++++
+
+error[E0433]: cannot find type `Utc` in this scope
+   --> src\ws.rs:163:23
+    |
+163 |             let now = Utc::now();
+    |                       ^^^ use of undeclared type `Utc`
+
+error[E0433]: cannot find type `Utc` in this scope
+   --> src\ws.rs:195:23
+    |
+195 |             let now = Utc::now();
+    |                       ^^^ use of undeclared type `Utc`
+
+error[E0308]: mismatched types
+  --> src\api.rs:68:12
+   |
+68 |     if let Some(expected) = &state.cfg.token {
+   |            ^^^^^^^^^^^^^^   ---------------- this expression has type `&std::string::String`
+   |            |
+   |            expected `String`, found `Option<_>`
+   |
+   = note: expected struct `std::string::String`
+                found enum `std::option::Option<_>`
+
+error[E0308]: mismatched types
+   --> src\ws.rs:230:12
+    |
+230 |     if let Some(o) = &t.overrides {
+    |            ^^^^^^^   ------------ this expression has type `&TaskOverrides`
+    |            |
+    |            expected `TaskOverrides`, found `Option<_>`
+    |
+    = note: expected struct `TaskOverrides`
+                 found enum `std::option::Option<_>`
+
+warning: unused variable: `state`
+   --> src\api.rs:640:11
+    |
+640 |     State(state): State<Arc<AppState>>,
+    |           ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `task_id`
+   --> src\scheduler.rs:151:13
+    |
+151 |         let task_id: Uuid = tid_str.parse()?;
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_task_id`
+
+warning: variable does not need to be mutable
+   --> src\scheduler.rs:317:13
+    |
+317 | ...   let mut stmt = conn.prepare("SELECT id, task_count, success_count, failed_count, workflow_id FROM workflow_
+runs WHERE dispatc...
+    |           ----^^^^
+    |           |
+    |           help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0308, E0425, E0433, E0597, E0599.
+For more information about an error, try `rustc --explain E0308`.
+warning: `pk` (lib) generated 4 warnings
+error: could not compile `pk` (lib) due to 11 previous errors; 4 warnings emitted
