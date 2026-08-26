@@ -314,6 +314,40 @@ pub async fn get_defaults(State(state): State<Arc<AppState>>) -> ApiResult<SpdeD
 
 // ── Agent 接口（节点调用） ────────────────────────────────
 
+pub async fn agent_register(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AgentRegisterReq>,
+) -> ApiResult<AgentRegisterResp> {
+    let node_id = req.node_id.unwrap_or_else(Uuid::new_v4);
+    let now = Utc::now();
+    state
+        .with_transaction(|conn| {
+            let exists: bool = conn
+                .query_row("SELECT COUNT(*) FROM nodes WHERE id = ?1", params![node_id.to_string()], |r| r.get::<_, i64>(0))
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if exists {
+                conn.execute(
+                    "UPDATE nodes SET hostname=?1, platform=?2, arch=?3, version=?4, status='online', last_seen=?5, labels=?6 WHERE id=?7",
+                    params![req.hostname, req.platform, req.arch, req.version, now.to_rfc3339(), serde_json::to_string(&req.labels)?, node_id.to_string()],
+                )?;
+            } else {
+                conn.execute(
+                    "INSERT INTO nodes VALUES (?1,?2,?3,?4,?5,'online',?6,?6,?7,0,0,NULL)",
+                    params![node_id.to_string(), req.hostname, req.platform, req.arch, req.version, now.to_rfc3339(), serde_json::to_string(&req.labels)?],
+                )?;
+            }
+            Ok(())
+        })
+        .await?;
+
+    Ok(Json(ApiResponse::ok(AgentRegisterResp {
+        node_id,
+        poll_interval_secs: state.cfg.heartbeat_timeout_secs / 2,
+        master_listen: state.cfg.listen.clone(),
+    })))
+}
+
 pub async fn agent_heartbeat(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AgentHeartbeatReq>,
@@ -687,6 +721,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/v1/workflows/{id}/trigger", post(trigger_workflow_handler))
         .route("/api/v1/workflow-runs", get(list_workflow_runs))
         // Agent
+        .route("/api/v1/agent/register", post(agent_register))
         .route("/api/v1/agent/heartbeat", post(agent_heartbeat))
         .route("/api/v1/agent/config", post(agent_fetch_config))
         .route("/api/v1/agent/report", post(agent_report))
