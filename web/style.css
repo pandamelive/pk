@@ -91,6 +91,7 @@ main { flex: 1; overflow: auto; padding: 28px 32px 48px; }
 .online { background: var(--accent); }
 .offline { background: #44554c; }
 .busy { background: var(--busy); }
+.pending { background: var(--warn); }
 .pill { font-size: 11px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
 .ok { color: var(--accent); border-color: #2a5c40; }
 .fail { color: var(--bad); border-color: #5c2a28; }

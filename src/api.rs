@@ -136,8 +136,14 @@ pub async fn delete_node(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<()> {
+    let now = Utc::now().to_rfc3339();
     state
         .with_transaction(|conn| {
+            // 记录到 deleted_nodes，该节点再次注册时需要审批
+            conn.execute(
+                "INSERT OR REPLACE INTO deleted_nodes (node_id, deleted_at, reason) VALUES (?1, ?2, 'manual_delete')",
+                params![id.to_string(), now],
+            )?;
             conn.execute("DELETE FROM nodes WHERE id = ?1", params![id.to_string()])?;
             Ok(())
         })
@@ -148,14 +154,66 @@ pub async fn delete_node(
 
 /// 批量清理离线节点（DELETE /api/v1/nodes）
 pub async fn purge_offline_nodes(State(state): State<Arc<AppState>>) -> ApiResult<u64> {
+    let now = Utc::now().to_rfc3339();
     let deleted = state
         .with_transaction(|conn| {
+            // 先查出所有 offline 节点的 id，记录到 deleted_nodes
+            let offline_ids: Vec<String> = conn
+                .prepare("SELECT id FROM nodes WHERE status = 'offline'")?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            for nid in &offline_ids {
+                conn.execute(
+                    "INSERT OR REPLACE INTO deleted_nodes (node_id, deleted_at, reason) VALUES (?1, ?2, 'purge_offline')",
+                    params![nid, now],
+                )?;
+            }
             let n = conn.execute("DELETE FROM nodes WHERE status = 'offline'", [])?;
             Ok(n as u64)
         })
         .await?;
     state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(deleted)))
+}
+
+// ── 节点审批（删除后再次注册需人工同意） ──────────────────
+
+/// 同意待审批节点
+pub async fn approve_node(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<()> {
+    state
+        .with_transaction(|conn| {
+            // 状态改为 online
+            conn.execute(
+                "UPDATE nodes SET status='online' WHERE id = ?1 AND status='pending'",
+                params![id.to_string()],
+            )?;
+            // 从 deleted_nodes 移除，以后重启不再标记为 pending
+            conn.execute("DELETE FROM deleted_nodes WHERE node_id = ?1", params![id.to_string()])?;
+            Ok(())
+        })
+        .await?;
+    state.frontend_ws_mgr.notify_update();
+    Ok(Json(ApiResponse::ok(())))
+}
+
+/// 拒绝待审批节点
+pub async fn reject_node(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<()> {
+    state
+        .with_transaction(|conn| {
+            // 从 nodes 表删除（保持在 deleted_nodes，下次注册仍为 pending）
+            conn.execute("DELETE FROM nodes WHERE id = ?1 AND status='pending'", params![id.to_string()])?;
+            Ok(())
+        })
+        .await?;
+    state.frontend_ws_mgr.notify_update();
+    Ok(Json(ApiResponse::ok(())))
 }
 
 // ── 任务管理 ──────────────────────────────────────────────
@@ -411,20 +469,40 @@ pub async fn agent_register(
     }
     state
         .with_transaction(|conn| {
+            // 检查该节点是否被删除过（删除过的节点再次注册需要审批）
+            let was_deleted: bool = conn
+                .query_row("SELECT COUNT(*) FROM deleted_nodes WHERE node_id = ?1", params![node_id.to_string()], |r| r.get::<_, i64>(0))
+                .map(|c| c > 0)
+                .unwrap_or(false);
+
             let exists: bool = conn
                 .query_row("SELECT COUNT(*) FROM nodes WHERE id = ?1", params![node_id.to_string()], |r| r.get::<_, i64>(0))
                 .map(|c| c > 0)
                 .unwrap_or(false);
+
             if exists {
+                // 已存在的节点：pending/busy 状态保持不变，其他更新为 online
+                let current_status: String = conn
+                    .query_row("SELECT status FROM nodes WHERE id = ?1", params![node_id.to_string()], |r| r.get(0))
+                    .unwrap_or_else(|_| "online".to_string());
+                let new_status = match current_status.as_str() {
+                    "pending" | "busy" => current_status.as_str(),
+                    _ => "online",
+                };
                 conn.execute(
-                    "UPDATE nodes SET hostname=?1, platform=?2, arch=?3, version=?4, status='online', last_seen=?5, labels=?6 WHERE id=?7",
-                    params![req.hostname, req.platform, req.arch, req.version, now.to_rfc3339(), serde_json::to_string(&req.labels)?, node_id.to_string()],
+                    "UPDATE nodes SET hostname=?1, platform=?2, arch=?3, version=?4, status=?5, last_seen=?6, labels=?7 WHERE id=?8",
+                    params![req.hostname, req.platform, req.arch, req.version, new_status, now.to_rfc3339(), serde_json::to_string(&req.labels)?, node_id.to_string()],
                 )?;
             } else {
+                // 新节点：被删过的状态为 pending（待审批），否则为 online（自动通过）
+                let init_status = if was_deleted { "pending" } else { "online" };
                 conn.execute(
-                    "INSERT INTO nodes VALUES (?1,?2,?3,?4,?5,'online',?6,?6,?7,0,0,NULL)",
-                    params![node_id.to_string(), req.hostname, req.platform, req.arch, req.version, now.to_rfc3339(), serde_json::to_string(&req.labels)?],
+                    "INSERT INTO nodes VALUES (?1,?2,?3,?4,?5,?6,?7,?7,?8,0,0,NULL)",
+                    params![node_id.to_string(), req.hostname, req.platform, req.arch, req.version, init_status, now.to_rfc3339(), serde_json::to_string(&req.labels)?],
                 )?;
+                if was_deleted {
+                    tracing::info!("节点 {} 曾被删除，再次注册标记为 pending 待审批", node_id);
+                }
             }
             Ok(())
         })
@@ -445,19 +523,30 @@ pub async fn agent_heartbeat(
     let now = Utc::now();
     state
         .with_transaction(|conn| {
+            // 节点不存在时直接忽略（被删除的节点不会通过心跳自动恢复，必须重新 register）
             let exists: bool = conn
                 .query_row("SELECT COUNT(*) FROM nodes WHERE id = ?1", params![req.node_id.to_string()], |r| r.get::<_, i64>(0))
                 .map(|c| c > 0)
                 .unwrap_or(false);
-            if exists {
+            if !exists {
+                return Ok(());
+            }
+            // pending 状态的节点保持 pending（待审批），只更新 last_seen，不改为 online
+            let current_status: String = conn
+                .query_row("SELECT status FROM nodes WHERE id = ?1", params![req.node_id.to_string()], |r| r.get(0))
+                .unwrap_or_else(|_| "online".to_string());
+            if current_status == "pending" {
                 conn.execute(
-                    "UPDATE nodes SET status='online', last_seen=?1, active_tasks=?2, bytes_downloaded=?3 WHERE id=?4",
+                    "UPDATE nodes SET last_seen=?1, active_tasks=?2, bytes_downloaded=?3 WHERE id=?4",
                     params![now.to_rfc3339(), req.active_tasks, req.bytes_downloaded, req.node_id.to_string()],
                 )?;
             } else {
+                // 根据活跃任务数和最大并发上限决定状态：达到上限=busy，否则=online
+                let max_concurrent = state.cfg.spde_defaults.max_concurrent;
+                let new_status = if req.active_tasks >= max_concurrent { "busy" } else { "online" };
                 conn.execute(
-                    "INSERT INTO nodes VALUES (?1,'unknown','unknown','unknown','unknown','online',?2,?2,'[]',?3,?4,NULL)",
-                    params![req.node_id.to_string(), now.to_rfc3339(), req.active_tasks, req.bytes_downloaded],
+                    "UPDATE nodes SET status=?1, last_seen=?2, active_tasks=?3, bytes_downloaded=?4 WHERE id=?5",
+                    params![new_status, now.to_rfc3339(), req.active_tasks, req.bytes_downloaded, req.node_id.to_string()],
                 )?;
             }
             Ok(())
@@ -474,17 +563,22 @@ pub async fn agent_fetch_config(
     let now = Utc::now();
     state
         .with_transaction(|conn| {
+            // 节点不存在时直接忽略（不自动创建，必须通过 register 注册）
             let exists: bool = conn
                 .query_row("SELECT COUNT(*) FROM nodes WHERE id = ?1", params![req.node_id.to_string()], |r| r.get::<_, i64>(0))
                 .map(|c| c > 0)
                 .unwrap_or(false);
-            if exists {
-                conn.execute("UPDATE nodes SET status='online', last_seen=?1 WHERE id=?2", params![now.to_rfc3339(), req.node_id.to_string()])?;
+            if !exists {
+                return Ok(());
+            }
+            // pending/busy 状态的节点保持不变，只更新 last_seen，不改为 online
+            let current_status: String = conn
+                .query_row("SELECT status FROM nodes WHERE id = ?1", params![req.node_id.to_string()], |r| r.get(0))
+                .unwrap_or_else(|_| "online".to_string());
+            if current_status == "pending" || current_status == "busy" {
+                conn.execute("UPDATE nodes SET last_seen=?1 WHERE id=?2", params![now.to_rfc3339(), req.node_id.to_string()])?;
             } else {
-                conn.execute(
-                    "INSERT INTO nodes VALUES (?1,?2,'unknown','unknown','unknown','online',?3,?3,'[]',0,0,NULL)",
-                    params![req.node_id.to_string(), req.hostname.clone().unwrap_or_else(|| "unknown".into()), now.to_rfc3339()],
-                )?;
+                conn.execute("UPDATE nodes SET status='online', last_seen=?1 WHERE id=?2", params![now.to_rfc3339(), req.node_id.to_string()])?;
             }
             Ok(())
         })
@@ -829,6 +923,8 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         // 节点
         .route("/api/v1/nodes", get(list_nodes).delete(purge_offline_nodes))
         .route("/api/v1/nodes/{id}", delete(delete_node))
+        .route("/api/v1/nodes/{id}/approve", post(approve_node))
+        .route("/api/v1/nodes/{id}/reject", post(reject_node))
         .route("/api/v1/nodes/{id}/config.yaml", get(get_node_config_yaml))
         .route("/api/v1/nodes/{id}/realtime", get(get_node_realtime))
         // 任务

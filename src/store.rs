@@ -158,6 +158,12 @@ fn create_tables(conn: &Connection) -> Result<()> {
             last_error TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS deleted_nodes (
+            node_id TEXT PRIMARY KEY,
+            deleted_at TEXT,
+            reason TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY,
             name TEXT,

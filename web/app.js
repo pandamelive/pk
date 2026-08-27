@@ -80,7 +80,12 @@ function renderKpis(o) {
 
 // ==================== 节点 ====================
 function renderNodes(nodes) {
-  $("#node-body").innerHTML = nodes.map((n) => `<tr>
+  $("#node-body").innerHTML = nodes.map((n) => {
+    const isPending = n.status === "pending";
+    const actions = isPending
+      ? `<button class="ghost" data-approve="${n.id}">同意</button><button class="danger" data-reject="${n.id}">拒绝</button>`
+      : `<button class="ghost" data-del-node="${n.id}">移除</button>`;
+    return `<tr>
     <td>${dot(n.status)}${pill(n.status)}</td>
     <td>${n.hostname}<div class="mono">${n.id}</div></td>
     <td>${n.platform} / ${n.arch}</td>
@@ -88,8 +93,9 @@ function renderNodes(nodes) {
     <td>${n.active_tasks}</td>
     <td>${fmtBytes(n.bytes_downloaded)}</td>
     <td>${fmtTime(n.last_seen)}</td>
-    <td class="actions"><button class="ghost" data-del-node="${n.id}">移除</button></td>
-  </tr>`).join("");
+    <td class="actions">${actions}</td>
+  </tr>`;
+  }).join("");
 }
 
 // ==================== 任务（任务池） ====================
@@ -491,6 +497,11 @@ document.addEventListener("click", async (e) => {
   try {
     if (t.dataset.delNode) {
       await api(`/api/v1/nodes/${t.dataset.delNode}`, { method: "DELETE" });
+    } else if (t.dataset.approve) {
+      await api(`/api/v1/nodes/${t.dataset.approve}/approve`, { method: "POST" });
+    } else if (t.dataset.reject) {
+      if (!confirm("拒绝该节点？拒绝后需重启 spde 才能再次申请。")) return;
+      await api(`/api/v1/nodes/${t.dataset.reject}/reject`, { method: "POST" });
     } else if (t.dataset.delTask) {
       const taskName = t.closest("tr")?.querySelector("td:nth-child(2)")?.textContent?.trim() || "该任务";
       const delFile = confirm(`删除任务「${taskName}」？\n\n点击「确定」同时删除已下载的文件，点击「取消」仅删除任务记录。`);

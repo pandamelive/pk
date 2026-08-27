@@ -102,14 +102,14 @@ pub fn execute_workflow(conn: &Connection, wf: &Workflow) -> Result<WorkflowRun>
 
 /// 节点从共享待下发池领取一个任务（原子操作，单进程天然串行）
 pub fn claim_task(conn: &Connection, node_id: Uuid) -> Result<Option<NodeTask>> {
-    // 节点必须在线
+    // 节点必须是 online 状态（pending 待审批节点不能领取任务）
     let node_online: bool = conn
         .query_row(
             "SELECT status FROM nodes WHERE id = ?1",
             params![node_id.to_string()],
             |r| r.get::<_, String>(0),
         )
-        .map(|s| s != "offline")
+        .map(|s| s == "online")
         .unwrap_or(false);
     if !node_online {
         return Ok(None);
@@ -438,7 +438,7 @@ pub fn cancel_task(conn: &Connection, task_id: Uuid) -> Result<()> {
 pub fn overview(conn: &Connection) -> Result<Overview> {
     let nodes_total: i64 = conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?;
     let nodes_online: i64 = conn
-        .query_row("SELECT COUNT(*) FROM nodes WHERE status != 'offline'", [], |r| r.get(0))?;
+        .query_row("SELECT COUNT(*) FROM nodes WHERE status IN ('online', 'busy')", [], |r| r.get(0))?;
     let tasks_total: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
     let tasks_running: i64 = conn
         .query_row("SELECT COUNT(*) FROM dispatches WHERE state IN ('running', 'acked')", [], |r| r.get(0))?;
