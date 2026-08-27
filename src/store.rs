@@ -143,9 +143,10 @@ impl AppState {
         let now = Utc::now();
         let cutoff = (now - timeout).to_rfc3339();
         let conn = self.conn.lock().await;
-        // 双向同步：最近有心跳的设为 online，超时的设为 offline
+        // 双向同步：最近有心跳的 offline 节点设为 online，超时的设为 offline
+        // 注意：只改 offline 状态，不影响 pending（待审批）和 busy（忙碌）状态
         conn.execute(
-            "UPDATE nodes SET status = 'online' WHERE last_seen >= ?1 AND status != 'online'",
+            "UPDATE nodes SET status = 'online' WHERE last_seen >= ?1 AND status = 'offline'",
             params![cutoff],
         )
         .ok();
