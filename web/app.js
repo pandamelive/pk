@@ -689,6 +689,8 @@ async function loadVersion() {
 loadVersion();
 refresh();
 setInterval(refresh, 5000);
+// 右上角时钟每秒更新
+setInterval(() => { const el = $("#clock"); if (el) el.textContent = new Date().toLocaleString(); }, 1000);
 
 // ==================== WebSocket 实时推送 ====================
 let wsRealtime = null;
