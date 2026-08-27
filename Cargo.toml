@@ -26,3 +26,7 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 [[bin]]
 name = "pk"
 path = "src/main.rs"
+
+[profile.release]
+codegen-units = 256
+lto = false
