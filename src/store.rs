@@ -150,8 +150,9 @@ impl AppState {
             params![cutoff],
         )
         .ok();
+        // 超时的 online/busy → offline（pending 不自动改，保持待审批等用户操作）
         conn.execute(
-            "UPDATE nodes SET status = 'offline', active_tasks = 0 WHERE last_seen < ?1",
+            "UPDATE nodes SET status = 'offline', active_tasks = 0 WHERE last_seen < ?1 AND status IN ('online', 'busy')",
             params![cutoff],
         )
         .ok();
