@@ -57,6 +57,20 @@ impl AppState {
 
         // 启动时清除所有内部节点（容器内spde，重建后旧节点必然失效）
         // 内部节点通过 labels 包含 "internal=true" 标记
+        // 清除时先把 node_id 加入 deleted_nodes，防止 spde 用旧 node_id 重新注册时自动通过
+        let internal_ids: Vec<String> = conn
+            .prepare("SELECT id FROM nodes WHERE labels LIKE '%internal=true%'")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |r| r.get::<_, String>(0))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default();
+        for nid in &internal_ids {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO deleted_nodes (node_id, deleted_at) VALUES (?1, ?2)",
+                params![nid, Utc::now().to_rfc3339()],
+            );
+        }
         let internal_cleared = conn
             .execute(
                 "DELETE FROM nodes WHERE labels LIKE '%internal=true%'",
@@ -64,7 +78,7 @@ impl AppState {
             )
             .unwrap_or(0);
         if internal_cleared > 0 {
-            tracing::info!("启动时清除 {} 个旧内部节点（容器重建后自动失效）", internal_cleared);
+            tracing::info!("启动时清除 {} 个旧内部节点并标记为已删除（容器重建后自动失效，需重新审批）", internal_cleared);
         }
 
         // 从旧 state.json 导入数据

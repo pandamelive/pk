@@ -550,7 +550,7 @@ pub async fn agent_register(
     if is_internal_addr(&addr.ip()) && !req.labels.iter().any(|l| l == "internal=true") {
         req.labels.push("internal=true".to_string());
     }
-    state
+    let node_status: String = state
         .with_transaction(|conn| {
             // 检查该节点是否被删除过（删除过的节点再次注册需要审批）
             let was_deleted: bool = conn
@@ -576,6 +576,7 @@ pub async fn agent_register(
                     "UPDATE nodes SET hostname=?1, platform=?2, arch=?3, version=?4, status=?5, last_seen=?6, labels=?7, max_concurrent=?8, max_bandwidth_bps=?9, capabilities=?10 WHERE id=?11",
                     params![req.hostname, req.platform, req.arch, req.version, new_status, now.to_rfc3339(), serde_json::to_string(&req.labels)?, req.max_concurrent, req.max_bandwidth_bps, req.capabilities.as_ref().map(|v| v.to_string()), node_id.to_string()],
                 )?;
+                return Ok(new_status.to_string());
             } else {
                 // 新节点：被删过的状态为 pending（待审批），否则为 online（自动通过）
                 let init_status = if was_deleted { "pending" } else { "online" };
@@ -586,8 +587,8 @@ pub async fn agent_register(
                 if was_deleted {
                     tracing::info!("节点 {} 曾被删除，再次注册标记为 pending 待审批", node_id);
                 }
+                return Ok(init_status.to_string());
             }
-            Ok(())
         })
         .await?;
 
@@ -596,6 +597,7 @@ pub async fn agent_register(
         node_id,
         poll_interval_secs: state.cfg.heartbeat_timeout_secs / 2,
         master_listen: state.cfg.listen.clone(),
+        status: node_status,
     })))
 }
 

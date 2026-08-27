@@ -346,6 +346,8 @@ pub struct AgentRegisterResp {
     pub node_id: Uuid,
     pub poll_interval_secs: u64,
     pub master_listen: String,
+    /// 节点注册后的状态（online/pending）
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
