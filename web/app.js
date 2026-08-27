@@ -708,10 +708,14 @@ function scheduleReconnect() {
   }, 5000);
 }
 
+// 全量刷新节流（避免WebSocket频繁触发导致HTTP请求风暴）
+let lastFullRefresh = 0;
+const FULL_REFRESH_INTERVAL = 2000; // 最少2秒一次全量刷新
+
 function handleRealtimeData(msg) {
   const realtimeNodes = msg.nodes || [];
 
-  // 更新 cachedNodes 中的实时字段
+  // 1. 立即更新节点实时字段（速度、进度）- 50ms级别，进度条流畅
   if (cachedNodes && Array.isArray(cachedNodes)) {
     for (const node of cachedNodes) {
       const rt = realtimeNodes.find((n) => n.node_id === node.id);
@@ -724,7 +728,7 @@ function handleRealtimeData(msg) {
     }
   }
 
-  // 根据当前视图只重渲染需要的部分
+  // 2. 立即重渲染当前页面（用更新后的节点数据）- 进度条、速度实时显示
   if (currentView === "nodes") {
     renderNodes(cachedNodes || []);
   } else if (currentView === "execution") {
@@ -737,6 +741,15 @@ function handleRealtimeData(msg) {
         `<div class="row-item">${dot(n.status)}<span>${n.hostname}</span><span class="mono">${n.platform}</span>${pill(n.status)}</div>`
       ).join("")) || `<div class="hint">还没有节点。用 agent 接入或执行安装脚本。</div>`;
     }
+  }
+
+  // 3. 节流全量刷新 - 确保任务状态、分发列表、工作流等也是最新的
+  //    任何数据变化（创建任务、状态变更等）都会触发WebSocket推送
+  //    全量刷新最多2秒一次，避免HTTP请求风暴
+  const now = Date.now();
+  if (now - lastFullRefresh >= FULL_REFRESH_INTERVAL) {
+    lastFullRefresh = now;
+    refresh();
   }
 }
 

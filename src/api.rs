@@ -142,6 +142,7 @@ pub async fn delete_node(
             Ok(())
         })
         .await?;
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(())))
 }
 
@@ -153,6 +154,7 @@ pub async fn purge_offline_nodes(State(state): State<Arc<AppState>>) -> ApiResul
             Ok(n as u64)
         })
         .await?;
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(deleted)))
 }
 
@@ -216,7 +218,8 @@ pub async fn create_task(
             Ok(())
         })
         .await?;
-    Ok(Json(ApiResponse::ok(task)))
+    state.frontend_ws_mgr.notify_update();
+        Ok(Json(ApiResponse::ok(task)))
 }
 
 pub async fn update_task(
@@ -264,7 +267,8 @@ pub async fn update_task(
             Ok(task)
         })
         .await?;
-    Ok(Json(ApiResponse::ok(task)))
+    state.frontend_ws_mgr.notify_update();
+        Ok(Json(ApiResponse::ok(task)))
 }
 
 pub async fn delete_task(
@@ -278,7 +282,8 @@ pub async fn delete_task(
             Ok(())
         })
         .await?;
-    Ok(Json(ApiResponse::ok(())))
+    state.frontend_ws_mgr.notify_update();
+        Ok(Json(ApiResponse::ok(())))
 }
 
 // ── 运行记录 ──────────────────────────────────────────────
@@ -407,6 +412,7 @@ pub async fn agent_register(
         })
         .await?;
 
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(AgentRegisterResp {
         node_id,
         poll_interval_secs: state.cfg.heartbeat_timeout_secs / 2,
@@ -439,7 +445,8 @@ pub async fn agent_heartbeat(
             Ok(())
         })
         .await?;
-    Ok(Json(ApiResponse::ok(())))
+    state.frontend_ws_mgr.notify_update();
+        Ok(Json(ApiResponse::ok(())))
 }
 
 pub async fn agent_fetch_config(
@@ -472,7 +479,8 @@ pub async fn agent_fetch_config(
         token: if state.cfg.token.is_empty() { None } else { Some(state.cfg.token.clone()) },
         tasks: vec![],
     };
-    Ok(Json(ApiResponse::ok(cfg)))
+    state.frontend_ws_mgr.notify_update();
+        Ok(Json(ApiResponse::ok(cfg)))
 }
 
 pub async fn agent_report(
@@ -482,7 +490,8 @@ pub async fn agent_report(
     let rec = state
         .with_transaction(|conn| scheduler::apply_report(conn, &req))
         .await?;
-    Ok(Json(ApiResponse::ok(rec)))
+    state.frontend_ws_mgr.notify_update();
+        Ok(Json(ApiResponse::ok(rec)))
 }
 
 /// 节点从共享待下发池领取一个任务
@@ -504,7 +513,8 @@ pub async fn agent_claim(
                 filename: node_task.task.filename,
                 overrides: node_task.task.overrides,
             };
-            (StatusCode::OK, Json(ApiResponse::ok(resp))).into_response()
+             state.frontend_ws_mgr.notify_update();
+                         (StatusCode::OK, Json(ApiResponse::ok(resp))).into_response()
         }
         Ok(None) => {
             // 池子空，返回 204
@@ -590,7 +600,8 @@ pub async fn create_workflow(
             Ok(())
         })
         .await?;
-    Ok(Json(ApiResponse::ok(wf)))
+    state.frontend_ws_mgr.notify_update();
+        Ok(Json(ApiResponse::ok(wf)))
 }
 
 pub async fn update_workflow(
@@ -630,7 +641,8 @@ pub async fn update_workflow(
             Ok(wf)
         })
         .await?;
-    Ok(Json(ApiResponse::ok(wf)))
+    state.frontend_ws_mgr.notify_update();
+        Ok(Json(ApiResponse::ok(wf)))
 }
 
 pub async fn delete_workflow(
@@ -644,7 +656,8 @@ pub async fn delete_workflow(
             Ok(())
         })
         .await?;
-    Ok(Json(ApiResponse::ok(())))
+    state.frontend_ws_mgr.notify_update();
+        Ok(Json(ApiResponse::ok(())))
 }
 
 pub async fn get_workflow(
@@ -696,6 +709,7 @@ pub async fn trigger_workflow_handler(
 ) -> ApiResult<WorkflowRun> {
     let run = workflow_scheduler::trigger_workflow(&state, id).await?;
     match run {
+        state.frontend_ws_mgr.notify_update();
         Some(r) => Ok(Json(ApiResponse::ok(r))),
         None => Err(AppError(anyhow::anyhow!("工作流不存在"))),
     }
