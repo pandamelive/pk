@@ -8,6 +8,7 @@ pub enum NodeStatus {
     Online,
     Offline,
     Busy,
+    Pending,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,6 +53,15 @@ pub struct Node {
     pub active_tasks: u32,
     pub bytes_downloaded: u64,
     pub last_error: Option<String>,
+    /// 节点最大并发任务数（None=用全局默认）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
+    /// 节点最大带宽上限 bps（None=不限制）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bandwidth_bps: Option<u64>,
+    /// 节点通用能力参数（JSON，灵活扩展）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<serde_json::Value>,
     /// 实时总速度（bps），从内存态填充
     #[serde(default)]
     pub total_speed_bps: u64,
@@ -320,6 +330,15 @@ pub struct AgentRegisterReq {
     pub version: String,
     #[serde(default)]
     pub labels: Vec<String>,
+    /// 节点上报的最大并发任务数
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
+    /// 节点上报的最大带宽上限 bps
+    #[serde(default)]
+    pub max_bandwidth_bps: Option<u64>,
+    /// 节点上报的通用能力参数（JSON，灵活扩展）
+    #[serde(default)]
+    pub capabilities: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

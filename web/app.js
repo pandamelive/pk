@@ -82,20 +82,38 @@ function renderKpis(o) {
 function renderNodes(nodes) {
   $("#node-body").innerHTML = nodes.map((n) => {
     const isPending = n.status === "pending";
+    const mc = n.max_concurrent ?? "默认";
+    const mb = n.max_bandwidth_bps ? (n.max_bandwidth_bps / 1024 / 1024).toFixed(0) + " MB/s" : "不限";
     const actions = isPending
       ? `<button class="ghost" data-approve="${n.id}">同意</button><button class="danger" data-reject="${n.id}">拒绝</button>`
-      : `<button class="ghost" data-del-node="${n.id}">移除</button>`;
+      : `<button class="ghost" data-edit-cap="${n.id}">能力</button><button class="ghost" data-del-node="${n.id}">移除</button>`;
     return `<tr>
     <td>${dot(n.status)}${pill(n.status)}</td>
     <td>${n.hostname}<div class="mono">${n.id}</div></td>
     <td>${n.platform} / ${n.arch}</td>
     <td>${n.version}</td>
-    <td>${n.active_tasks}</td>
+    <td>${n.active_tasks} / ${mc}</td>
+    <td>${mb}</td>
     <td>${fmtBytes(n.bytes_downloaded)}</td>
     <td>${fmtTime(n.last_seen)}</td>
     <td class="actions">${actions}</td>
   </tr>`;
   }).join("");
+}
+
+// 编辑节点能力参数
+async function editNodeCapabilities(nodeId) {
+  const node = cachedNodes?.find((n) => n.id === nodeId);
+  if (!node) return;
+  const mc = prompt("最大并发任务数（留空=用全局默认）:", node.max_concurrent ?? "");
+  if (mc === null) return;
+  const mb = prompt("最大带宽上限 MB/s（留空=不限）:", node.max_bandwidth_bps ? (node.max_bandwidth_bps / 1024 / 1024).toFixed(0) : "");
+  if (mb === null) return;
+  const body = {};
+  if (mc.trim()) body.max_concurrent = parseInt(mc);
+  if (mb.trim()) body.max_bandwidth_bps = parseInt(mb) * 1024 * 1024;
+  await api(`/api/v1/nodes/${nodeId}/capabilities`, { method: "PUT", body: JSON.stringify(body) });
+  refresh();
 }
 
 // ==================== 任务（任务池） ====================
@@ -497,6 +515,8 @@ document.addEventListener("click", async (e) => {
   try {
     if (t.dataset.delNode) {
       await api(`/api/v1/nodes/${t.dataset.delNode}`, { method: "DELETE" });
+    } else if (t.dataset.editCap) {
+      await editNodeCapabilities(t.dataset.editCap);
     } else if (t.dataset.approve) {
       await api(`/api/v1/nodes/${t.dataset.approve}/approve`, { method: "POST" });
     } else if (t.dataset.reject) {

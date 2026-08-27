@@ -39,6 +39,11 @@ impl AppState {
         )?;
         create_tables(&conn)?;
 
+        // 数据库迁移：旧库添加节点能力参数字段
+        let _ = conn.execute("ALTER TABLE nodes ADD COLUMN max_concurrent INTEGER", []);
+        let _ = conn.execute("ALTER TABLE nodes ADD COLUMN max_bandwidth_bps INTEGER", []);
+        let _ = conn.execute("ALTER TABLE nodes ADD COLUMN capabilities TEXT", []);
+
         // 重启时回收所有非终态 dispatch，避免节点崩溃后任务永远卡在 running/acked
         let reclaimed = conn
             .execute(
@@ -155,7 +160,10 @@ fn create_tables(conn: &Connection) -> Result<()> {
             labels TEXT,
             active_tasks INTEGER,
             bytes_downloaded INTEGER,
-            last_error TEXT
+            last_error TEXT,
+            max_concurrent INTEGER,
+            max_bandwidth_bps INTEGER,
+            capabilities TEXT
         );
 
         CREATE TABLE IF NOT EXISTS deleted_nodes (

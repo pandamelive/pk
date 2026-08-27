@@ -81,7 +81,7 @@ pub fn check_auth(state: &AppState, token: Option<&str>) -> Result<(), AppError>
 pub async fn list_nodes(State(state): State<Arc<AppState>>) -> ApiResult<Vec<Node>> {
     let mut nodes = state
         .with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT id, hostname, platform, arch, version, status, last_seen, registered_at, labels, active_tasks, bytes_downloaded, last_error FROM nodes ORDER BY registered_at DESC")?;
+            let mut stmt = conn.prepare("SELECT id, hostname, platform, arch, version, status, last_seen, registered_at, labels, active_tasks, bytes_downloaded, last_error, max_concurrent, max_bandwidth_bps, capabilities FROM nodes ORDER BY registered_at DESC")?;
             let nodes: Vec<Node> = stmt
                 .query_map([], |r| {
                     let labels_str: String = r.get(8)?;
@@ -93,6 +93,8 @@ pub async fn list_nodes(State(state): State<Arc<AppState>>) -> ApiResult<Vec<Nod
                         version: r.get(4)?,
                         status: match r.get::<_, String>(5)?.as_str() {
                             "online" => NodeStatus::Online,
+                            "busy" => NodeStatus::Busy,
+                            "pending" => NodeStatus::Pending,
                             _ => NodeStatus::Offline,
                         },
                         last_seen: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(6)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
@@ -101,6 +103,12 @@ pub async fn list_nodes(State(state): State<Arc<AppState>>) -> ApiResult<Vec<Nod
                         active_tasks: r.get(9)?,
                         bytes_downloaded: r.get(10)?,
                         last_error: r.get(11)?,
+                        max_concurrent: r.get(12)?,
+                        max_bandwidth_bps: r.get(13)?,
+                        capabilities: {
+                            let cap_str: Option<String> = r.get(14).ok();
+                            cap_str.and_then(|s| serde_json::from_str(&s).ok())
+                        },
                         total_speed_bps: 0,
                         active_tasks_progress: Vec::new(),
                     })
@@ -175,6 +183,70 @@ pub async fn purge_offline_nodes(State(state): State<Arc<AppState>>) -> ApiResul
         .await?;
     state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(deleted)))
+}
+
+// ── 节点能力参数管理 ──────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateNodeCapabilitiesReq {
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
+    #[serde(default)]
+    pub max_bandwidth_bps: Option<u64>,
+    /// 通用能力参数合并（pk 不认识的字段透传，不做解析）
+    #[serde(default)]
+    pub capabilities: Option<serde_json::Value>,
+}
+
+/// 修改节点能力参数（合并模式：pk 只改认识的字段，其他保留 spde 原值）
+pub async fn update_node_capabilities(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateNodeCapabilitiesReq>,
+) -> ApiResult<()> {
+    state
+        .with_transaction(|conn| {
+            // 读取节点当前的 capabilities（spde 上报的原始能力）
+            let current_cap_str: Option<String> = conn
+                .query_row("SELECT capabilities FROM nodes WHERE id = ?1", params![id.to_string()], |r| r.get(0))
+                .ok();
+            let mut current_cap: serde_json::Value = current_cap_str
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(serde_json::json!({}));
+
+            // 合并模式：pk 认识的字段覆盖，其他保留
+            if let Some(obj) = current_cap.as_object_mut() {
+                if let Some(mc) = req.max_concurrent {
+                    obj.insert("max_concurrent".to_string(), serde_json::json!(mc));
+                }
+                if let Some(mb) = req.max_bandwidth_bps {
+                    obj.insert("max_bandwidth_bps".to_string(), serde_json::json!(mb));
+                }
+                // 合并通用 capabilities（pk 不认识的字段透传）
+                if let Some(extra) = &req.capabilities {
+                    if let Some(extra_obj) = extra.as_object() {
+                        for (k, v) in extra_obj {
+                            obj.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+
+            // 更新数据库：独立字段 + 合并后的 capabilities JSON
+            conn.execute(
+                "UPDATE nodes SET max_concurrent=?1, max_bandwidth_bps=?2, capabilities=?3 WHERE id=?4",
+                params![
+                    req.max_concurrent,
+                    req.max_bandwidth_bps,
+                    current_cap.to_string(),
+                    id.to_string()
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+    state.frontend_ws_mgr.notify_update();
+    Ok(Json(ApiResponse::ok(())))
 }
 
 // ── 节点审批（删除后再次注册需人工同意） ──────────────────
@@ -501,15 +573,15 @@ pub async fn agent_register(
                     _ => "online",
                 };
                 conn.execute(
-                    "UPDATE nodes SET hostname=?1, platform=?2, arch=?3, version=?4, status=?5, last_seen=?6, labels=?7 WHERE id=?8",
-                    params![req.hostname, req.platform, req.arch, req.version, new_status, now.to_rfc3339(), serde_json::to_string(&req.labels)?, node_id.to_string()],
+                    "UPDATE nodes SET hostname=?1, platform=?2, arch=?3, version=?4, status=?5, last_seen=?6, labels=?7, max_concurrent=?8, max_bandwidth_bps=?9, capabilities=?10 WHERE id=?11",
+                    params![req.hostname, req.platform, req.arch, req.version, new_status, now.to_rfc3339(), serde_json::to_string(&req.labels)?, req.max_concurrent, req.max_bandwidth_bps, req.capabilities.as_ref().map(|v| v.to_string()), node_id.to_string()],
                 )?;
             } else {
                 // 新节点：被删过的状态为 pending（待审批），否则为 online（自动通过）
                 let init_status = if was_deleted { "pending" } else { "online" };
                 conn.execute(
-                    "INSERT INTO nodes VALUES (?1,?2,?3,?4,?5,?6,?7,?7,?8,0,0,NULL)",
-                    params![node_id.to_string(), req.hostname, req.platform, req.arch, req.version, init_status, now.to_rfc3339(), serde_json::to_string(&req.labels)?],
+                    "INSERT INTO nodes VALUES (?1,?2,?3,?4,?5,?6,?7,?7,?8,0,0,NULL,?9,?10,?11)",
+                    params![node_id.to_string(), req.hostname, req.platform, req.arch, req.version, init_status, now.to_rfc3339(), serde_json::to_string(&req.labels)?, req.max_concurrent, req.max_bandwidth_bps, req.capabilities.as_ref().map(|v| v.to_string())],
                 )?;
                 if was_deleted {
                     tracing::info!("节点 {} 曾被删除，再次注册标记为 pending 待审批", node_id);
@@ -542,18 +614,18 @@ pub async fn agent_heartbeat(
             if !exists {
                 return Ok(());
             }
-            // pending 状态的节点保持 pending（待审批），只更新 last_seen，不改为 online
-            let current_status: String = conn
-                .query_row("SELECT status FROM nodes WHERE id = ?1", params![req.node_id.to_string()], |r| r.get(0))
-                .unwrap_or_else(|_| "online".to_string());
+            // 查询节点当前状态和自定义的最大并发数
+            let (current_status, node_max_concurrent): (String, Option<u32>) = conn
+                .query_row("SELECT status, max_concurrent FROM nodes WHERE id = ?1", params![req.node_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap_or_else(|_| ("online".to_string(), None));
             if current_status == "pending" {
                 conn.execute(
                     "UPDATE nodes SET last_seen=?1, active_tasks=?2, bytes_downloaded=?3 WHERE id=?4",
                     params![now.to_rfc3339(), req.active_tasks, req.bytes_downloaded, req.node_id.to_string()],
                 )?;
             } else {
-                // 根据活跃任务数和最大并发上限决定状态：达到上限=busy，否则=online
-                let max_concurrent = state.cfg.spde_defaults.max_concurrent;
+                // 优先用节点自定义的最大并发数，否则用全局默认
+                let max_concurrent = node_max_concurrent.unwrap_or(state.cfg.spde_defaults.max_concurrent);
                 let new_status = if req.active_tasks >= max_concurrent { "busy" } else { "online" };
                 conn.execute(
                     "UPDATE nodes SET status=?1, last_seen=?2, active_tasks=?3, bytes_downloaded=?4 WHERE id=?5",
@@ -935,6 +1007,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/v1/nodes", get(list_nodes).delete(purge_offline_nodes))
         .route("/api/v1/nodes/{id}", delete(delete_node))
         .route("/api/v1/nodes/{id}/approve", post(approve_node))
+        .route("/api/v1/nodes/{id}/capabilities", put(update_node_capabilities))
         .route("/api/v1/nodes/{id}/reject", post(reject_node))
         .route("/api/v1/nodes/{id}/config.yaml", get(get_node_config_yaml))
         .route("/api/v1/nodes/{id}/realtime", get(get_node_realtime))
