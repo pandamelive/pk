@@ -145,6 +145,17 @@ pub async fn delete_node(
     Ok(Json(ApiResponse::ok(())))
 }
 
+/// 批量清理离线节点（DELETE /api/v1/nodes）
+pub async fn purge_offline_nodes(State(state): State<Arc<AppState>>) -> ApiResult<u64> {
+    let deleted = state
+        .with_transaction(|conn| {
+            let n = conn.execute("DELETE FROM nodes WHERE status = 'offline'", [])?;
+            Ok(n as u64)
+        })
+        .await?;
+    Ok(Json(ApiResponse::ok(deleted)))
+}
+
 // ── 任务管理 ──────────────────────────────────────────────
 
 pub async fn list_tasks(State(state): State<Arc<AppState>>) -> ApiResult<Vec<Task>> {
@@ -784,7 +795,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/v1/defaults", get(get_defaults))
         .route("/api/v1/host-info", get(host_info))
         // 节点
-        .route("/api/v1/nodes", get(list_nodes))
+        .route("/api/v1/nodes", get(list_nodes).delete(purge_offline_nodes))
         .route("/api/v1/nodes/{id}", delete(delete_node))
         .route("/api/v1/nodes/{id}/config.yaml", get(get_node_config_yaml))
         .route("/api/v1/nodes/{id}/realtime", get(get_node_realtime))
