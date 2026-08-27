@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pk::{api, web, workflow_scheduler, ws, AppState, PkConfig};
+use pk::{api, manifest, web, workflow_scheduler, ws, AppState, PkConfig};
 use std::net::SocketAddr;
 use std::path::PathBuf;use tracing_subscriber::EnvFilter;
 
@@ -13,6 +13,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// 输出自描述能力清单（说明书）
+    Manifest,
     /// 启动主控 HTTP + Web UI
     Serve {
         /// 配置文件路径（默认：可执行文件同级 pk-controlcenter/config.yaml）
@@ -34,6 +36,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.cmd {
+        Commands::Manifest => {
+            manifest::print_manifest();
+            Ok(())
+        }
         Commands::Serve { config, listen } => run_serve(config, listen).await,
     }
 }

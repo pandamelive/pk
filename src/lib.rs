@@ -7,6 +7,7 @@ pub mod store;
 pub mod web;
 pub mod workflow_scheduler;
 pub mod ws;
+pub mod manifest;
 
 pub use config::PkConfig;
 pub use store::AppState;
