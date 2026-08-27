@@ -473,6 +473,8 @@ async fn handle_client_msg(
                 .await?;
         }
     }
+    // 任何节点消息都可能导致前端需要更新，标记脏数据，50ms内推送
+    state.frontend_ws_mgr.notify_update();
     Ok(())
 }
 
@@ -541,13 +543,25 @@ pub struct FrontendNodeState {
 /// 前端 WebSocket 连接管理器
 pub struct FrontendWsManager {
     conns: RwLock<HashMap<Uuid, mpsc::UnboundedSender<Message>>>,
+    dirty: std::sync::atomic::AtomicBool,
 }
 
 impl FrontendWsManager {
     pub fn new() -> Self {
         Self {
             conns: RwLock::new(HashMap::new()),
+            dirty: std::sync::atomic::AtomicBool::new(true),
         }
+    }
+
+    /// 标记有新数据需要推送（事件驱动，spde上报进度时调用）
+    pub fn notify_update(&self) {
+        self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 检查并清除脏标志，返回是否需要推送
+    pub fn check_and_clear_dirty(&self) -> bool {
+        self.dirty.swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn register(&self, conn_id: Uuid, tx: mpsc::UnboundedSender<Message>) {
@@ -634,12 +648,24 @@ async fn handle_frontend_socket(socket: WebSocket, state: Arc<AppState>) {
 /// 启动实时状态广播任务（每秒向所有前端推送一次）
 pub fn spawn_realtime_broadcaster(state: Arc<AppState>) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        // 50ms 检查一次脏标志，事件驱动 + 节流，人眼感知不到延迟
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
+        let mut last_full_broadcast = std::time::Instant::now();
         loop {
             interval.tick().await;
             let conn_count = state.frontend_ws_mgr.conn_count().await;
             if conn_count == 0 {
-                continue; // 没有前端连接，跳过
+                continue;
+            }
+
+            // 事件驱动：有脏数据才广播；但最多每秒兜底广播一次，确保状态同步
+            let dirty = state.frontend_ws_mgr.check_and_clear_dirty();
+            let need_full_broadcast = last_full_broadcast.elapsed() >= std::time::Duration::from_secs(1);
+            if !dirty && !need_full_broadcast {
+                continue;
+            }
+            if need_full_broadcast {
+                last_full_broadcast = std::time::Instant::now();
             }
 
             // 从数据库获取节点基本信息
