@@ -207,8 +207,19 @@ pub async fn reject_node(
 ) -> ApiResult<()> {
     state
         .with_transaction(|conn| {
-            // 从 nodes 表删除（保持在 deleted_nodes，下次注册仍为 pending）
-            conn.execute("DELETE FROM nodes WHERE id = ?1 AND status='pending'", params![id.to_string()])?;
+            // 拒绝不删除节点，保持 pending 状态，用户可随时再点同意
+            // 在 labels 中添加 rejected 标记，便于前端识别
+            let labels_str: String = conn
+                .query_row("SELECT labels FROM nodes WHERE id = ?1", params![id.to_string()], |r| r.get(0))
+                .unwrap_or_else(|_| "[]".to_string());
+            let mut labels: Vec<String> = serde_json::from_str(&labels_str).unwrap_or_default();
+            if !labels.iter().any(|l| l == "rejected") {
+                labels.push("rejected".to_string());
+            }
+            conn.execute(
+                "UPDATE nodes SET labels=?1 WHERE id=?2 AND status='pending'",
+                params![serde_json::to_string(&labels)?, id.to_string()],
+            )?;
             Ok(())
         })
         .await?;

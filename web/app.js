@@ -500,7 +500,7 @@ document.addEventListener("click", async (e) => {
     } else if (t.dataset.approve) {
       await api(`/api/v1/nodes/${t.dataset.approve}/approve`, { method: "POST" });
     } else if (t.dataset.reject) {
-      if (!confirm("拒绝该节点？拒绝后需重启 spde 才能再次申请。")) return;
+      if (!confirm("拒绝该节点？节点仍保留在列表中，可随时点同意。")) return;
       await api(`/api/v1/nodes/${t.dataset.reject}/reject`, { method: "POST" });
     } else if (t.dataset.delTask) {
       const taskName = t.closest("tr")?.querySelector("td:nth-child(2)")?.textContent?.trim() || "该任务";
