@@ -246,7 +246,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, initial_node_id:
         if let Err(e) = state
             .with_transaction(move |conn| {
                 conn.execute(
-                    "UPDATE nodes SET status='online', last_seen=?1 WHERE id=?2",
+                    "UPDATE nodes SET status=CASE WHEN status='pending' THEN 'pending' ELSE 'online' END, last_seen=?1 WHERE id=?2",
                     params![now.to_rfc3339(), nid.to_string()],
                 )?;
                 Ok(())
@@ -321,7 +321,7 @@ async fn handle_client_msg(
                 state
                     .with_transaction(move |conn| {
                         conn.execute(
-                            "UPDATE nodes SET status='online', last_seen=?1, active_tasks=?2, bytes_downloaded=?3 WHERE id=?4",
+                            "UPDATE nodes SET status=CASE WHEN status='pending' THEN 'pending' ELSE 'online' END, last_seen=?1, active_tasks=?2, bytes_downloaded=?3 WHERE id=?4",
                             params![now.to_rfc3339(), active_tasks, bytes_downloaded, nid.to_string()],
                         )?;
                         Ok(())
@@ -422,7 +422,7 @@ async fn handle_client_msg(
                 state
                     .with_transaction(move |conn| {
                         conn.execute(
-                            "UPDATE nodes SET status='online', last_seen=?1 WHERE id=?2",
+                            "UPDATE nodes SET status=CASE WHEN status='pending' THEN 'pending' ELSE 'online' END, last_seen=?1 WHERE id=?2",
                             params![now.to_rfc3339(), nid.to_string()],
                         )?;
                         Ok(())
@@ -454,7 +454,7 @@ async fn handle_client_msg(
                         .unwrap_or(false);
                     if exists {
                         conn.execute(
-                            "UPDATE nodes SET hostname=?1, platform=?2, arch=?3, version=?4, status='online', last_seen=?5 WHERE id=?6",
+                            "UPDATE nodes SET hostname=?1, platform=?2, arch=?3, version=?4, status=CASE WHEN status='pending' THEN 'pending' ELSE 'online' END, last_seen=?5 WHERE id=?6",
                             params![hostname, platform, arch, version, now.to_rfc3339(), node_id.to_string()],
                         )?;
                     } else {
@@ -479,7 +479,7 @@ async fn handle_client_msg(
             state
                 .with_transaction(move |conn| {
                     conn.execute(
-                        "UPDATE nodes SET status='online', last_seen=?1, active_tasks=?2, bytes_downloaded=?3 WHERE id=?4",
+                        "UPDATE nodes SET status=CASE WHEN status='pending' THEN 'pending' ELSE 'online' END, last_seen=?1, active_tasks=?2, bytes_downloaded=?3 WHERE id=?4",
                         params![now.to_rfc3339(), active_tasks, bytes_downloaded, node_id.to_string()],
                     )?;
                     Ok(())
