@@ -689,8 +689,8 @@ async function loadVersion() {
 loadVersion();
 refresh();
 setInterval(refresh, 5000);
-// 右上角时钟每秒更新
-setInterval(() => { const el = $("#clock"); if (el) el.textContent = new Date().toLocaleString(); }, 1000);
+// 右上角时钟实时更新（50ms）
+setInterval(() => { const el = $("#clock"); if (el) el.textContent = new Date().toLocaleString(); }, 50);
 
 // ==================== WebSocket 实时推送 ====================
 let wsRealtime = null;
@@ -746,7 +746,7 @@ function scheduleReconnect() {
 
 // 全量刷新节流（避免WebSocket频繁触发导致HTTP请求风暴）
 let lastFullRefresh = 0;
-const FULL_REFRESH_INTERVAL = 2000; // 最少2秒一次全量刷新
+const FULL_REFRESH_INTERVAL = 50; // 最少50ms一次全量刷新
 
 function handleRealtimeData(msg) {
   const realtimeNodes = msg.nodes || [];
