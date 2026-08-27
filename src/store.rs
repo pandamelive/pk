@@ -50,6 +50,18 @@ impl AppState {
             tracing::info!("启动时回收 {} 个卡住的 dispatch 到待下发池", reclaimed);
         }
 
+        // 启动时清除所有内部节点（容器内spde，重建后旧节点必然失效）
+        // 内部节点通过 labels 包含 "internal=true" 标记
+        let internal_cleared = conn
+            .execute(
+                "DELETE FROM nodes WHERE labels LIKE '%internal=true%'",
+                [],
+            )
+            .unwrap_or(0);
+        if internal_cleared > 0 {
+            tracing::info!("启动时清除 {} 个旧内部节点（容器重建后自动失效）", internal_cleared);
+        }
+
         // 从旧 state.json 导入数据
         let json_path = data_dir.join("state.json");
         if json_path.exists() {

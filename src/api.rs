@@ -6,7 +6,7 @@ use crate::store::{artifact_filename, detect_host_platform, AppState};
 use crate::ws;
 use crate::workflow_scheduler;
 use anyhow::Result;
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -385,12 +385,30 @@ pub async fn get_node_config_yaml(
 
 // ── Agent 接口（节点调用） ────────────────────────────────
 
+/// 判断是否为内部地址（本地回环或内网IP）
+fn is_internal_addr(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unspecified()
+        }
+    }
+}
+
 pub async fn agent_register(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<AgentRegisterReq>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    Json(mut req): Json<AgentRegisterReq>,
 ) -> ApiResult<AgentRegisterResp> {
     let node_id = req.node_id.unwrap_or_else(Uuid::new_v4);
     let now = Utc::now();
+
+    // 自动标记内部节点：本地回环或内网IP连接的agent
+    if is_internal_addr(&addr.ip()) && !req.labels.iter().any(|l| l == "internal=true") {
+        req.labels.push("internal=true".to_string());
+    }
     state
         .with_transaction(|conn| {
             let exists: bool = conn
