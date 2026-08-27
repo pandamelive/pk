@@ -510,3 +510,198 @@ pub fn build_node_task_config(state: &AppState, node_task: &scheduler::NodeTask)
         tasks: vec![item],
     }
 }
+
+// ── 前端 WebSocket 实时推送 ────────────────────────────────
+/// 前端实时推送消息
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FrontendPushMsg {
+    /// 全量实时状态（每秒推送一次）
+    Realtime {
+        nodes: Vec<FrontendNodeState>,
+        timestamp: String,
+    },
+    /// 保活 ping
+    Ping,
+}
+
+/// 前端展示用的节点实时状态
+#[derive(Debug, Clone, Serialize)]
+pub struct FrontendNodeState {
+    pub node_id: Uuid,
+    pub hostname: String,
+    pub platform: String,
+    pub version: String,
+    pub status: String,
+    pub total_speed_bps: u64,
+    pub active_tasks: Vec<TaskProgressState>,
+    pub last_seen: String,
+}
+
+/// 前端 WebSocket 连接管理器
+pub struct FrontendWsManager {
+    conns: RwLock<HashMap<Uuid, mpsc::UnboundedSender<Message>>>,
+}
+
+impl FrontendWsManager {
+    pub fn new() -> Self {
+        Self {
+            conns: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub async fn register(&self, conn_id: Uuid, tx: mpsc::UnboundedSender<Message>) {
+        let mut conns = self.conns.write().await;
+        conns.insert(conn_id, tx);
+        tracing::info!("[frontend-ws] 前端连接 conn_id={}, 当前连接数={}", conn_id, conns.len());
+    }
+
+    pub async fn remove(&self, conn_id: Uuid) {
+        let mut conns = self.conns.write().await;
+        conns.remove(&conn_id);
+        tracing::info!("[frontend-ws] 前端连接关闭 conn_id={}, 当前连接数={}", conn_id, conns.len());
+    }
+
+    /// 向所有前端连接广播消息
+    pub async fn broadcast(&self, msg: &FrontendPushMsg) {
+        let text = match serde_json::to_string(msg) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("[frontend-ws] 序列化消息失败: {}", e);
+                return;
+            }
+        };
+        let conns = self.conns.read().await;
+        for tx in conns.values() {
+            let _ = tx.send(Message::Text(text.clone().into()));
+        }
+    }
+
+    pub async fn conn_count(&self) -> usize {
+        self.conns.read().await.len()
+    }
+}
+
+/// 前端 WebSocket 处理入口
+pub async fn frontend_ws_handler(
+    State(state): State<Arc<AppState>>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_frontend_socket(socket, state))
+}
+
+async fn handle_frontend_socket(socket: WebSocket, state: Arc<AppState>) {
+    let (mut sender, mut receiver) = socket.split();
+    let conn_id = Uuid::new_v4();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    state.frontend_ws_mgr.register(conn_id, tx).await;
+
+    // 发送任务：mpsc 消息 + 每 30 秒发 Ping 保活
+    let send_task = tokio::spawn(async move {
+        let mut ping = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = ping.tick() => {
+                    let text = serde_json::to_string(&FrontendPushMsg::Ping).unwrap_or_default();
+                    if sender.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Some(msg) = rx.recv() => {
+                    if sender.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    // 接收任务：前端消息（目前只处理 Ping/Pong，不处理其他）
+    while let Some(Ok(msg)) = receiver.next().await {
+        match msg {
+            Message::Text(_) => {}
+            Message::Binary(_) => {}
+            Message::Ping(_) => {}
+            Message::Pong(_) => {}
+            Message::Close(_) => break,
+        }
+    }
+
+    state.frontend_ws_mgr.remove(conn_id).await;
+    send_task.abort();
+}
+
+/// 启动实时状态广播任务（每秒向所有前端推送一次）
+pub fn spawn_realtime_broadcaster(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let conn_count = state.frontend_ws_mgr.conn_count().await;
+            if conn_count == 0 {
+                continue; // 没有前端连接，跳过
+            }
+
+            // 从数据库获取节点基本信息
+            let nodes_result = state
+                .with_conn(|conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, hostname, platform, arch, version, status, last_seen FROM nodes ORDER BY hostname",
+                    )?;
+                    let nodes: Vec<(String, String, String, String, String, String, String)> = stmt
+                        .query_map([], |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                                r.get::<_, String>(3)?,
+                                r.get::<_, String>(4)?,
+                                r.get::<_, String>(5)?,
+                                r.get::<_, String>(6)?,
+                            ))
+                        })?
+                        .filter_map(|r| r.ok())
+                        .collect();
+                    Ok(nodes)
+                })
+                .await;
+
+            let nodes = match nodes_result {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!("[frontend-ws] 查询节点失败: {}", e);
+                    continue;
+                }
+            };
+
+            // 获取所有节点实时状态
+            let realtime_map = state.ws_mgr.get_all_realtime().await;
+
+            // 组装前端节点状态
+            let frontend_nodes: Vec<FrontendNodeState> = nodes
+                .into_iter()
+                .map(|(id, hostname, platform, _arch, version, status, last_seen)| {
+                    let node_id = Uuid::parse_str(&id).unwrap_or(Uuid::nil());
+                    let rt = realtime_map.get(&node_id).cloned().unwrap_or_default();
+                    FrontendNodeState {
+                        node_id,
+                        hostname,
+                        platform,
+                        version,
+                        status,
+                        total_speed_bps: rt.total_speed_bps,
+                        active_tasks: rt.active_tasks,
+                        last_seen,
+                    }
+                })
+                .collect();
+
+            let msg = FrontendPushMsg::Realtime {
+                nodes: frontend_nodes,
+                timestamp: Utc::now().to_rfc3339(),
+            };
+
+            state.frontend_ws_mgr.broadcast(&msg).await;
+        }
+    });
+}

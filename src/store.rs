@@ -1,6 +1,6 @@
 use crate::config::PkConfig;
 use crate::models::*;
-use crate::ws::WsManager;
+use crate::ws::{FrontendWsManager, WsManager};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection};
@@ -14,6 +14,7 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub artifacts_dir: PathBuf,
     pub ws_mgr: WsManager,
+    pub frontend_ws_mgr: FrontendWsManager,
     pub conn: Mutex<Connection>,
 }
 
@@ -69,6 +70,7 @@ impl AppState {
             data_dir,
             artifacts_dir,
             ws_mgr: WsManager::new(),
+            frontend_ws_mgr: FrontendWsManager::new(),
             conn: Mutex::new(conn),
         }))
     }

@@ -819,6 +819,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/v1/agent/claim", post(agent_claim))
         // WebSocket
         .route("/api/v1/agent/ws", get(ws::ws_handler))
+        .route("/api/v1/realtime/ws", get(ws::frontend_ws_handler))
         // 二进制分发
         .route("/api/v1/artifacts/{platform}", get(serve_artifact))
         .with_state(state)

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pk::{api, web, workflow_scheduler, AppState, PkConfig};
+use pk::{api, web, workflow_scheduler, ws, AppState, PkConfig};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
@@ -60,6 +60,8 @@ async fn run_serve(config: Option<PathBuf>, listen: Option<String>) -> Result<()
 
     // 启动工作流后台调度器
     workflow_scheduler::start(state.clone()).await;
+    // 启动前端 WebSocket 实时状态广播（每秒推送一次）
+    ws::spawn_realtime_broadcaster(state.clone());
 
     let app = api::router(state.clone());
     let app = web::mount(app);

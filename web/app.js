@@ -655,3 +655,90 @@ async function loadVersion() {
 loadVersion();
 refresh();
 setInterval(refresh, 5000);
+
+// ==================== WebSocket 实时推送 ====================
+let wsRealtime = null;
+let wsReconnectTimer = null;
+
+function connectRealtimeWS() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${proto}//${location.host}/api/v1/realtime/ws`;
+  try {
+    wsRealtime = new WebSocket(wsUrl);
+  } catch (e) {
+    scheduleReconnect();
+    return;
+  }
+
+  wsRealtime.onopen = () => {
+    console.log("[realtime-ws] 已连接");
+    if (wsReconnectTimer) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
+  };
+
+  wsRealtime.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === "realtime") {
+        handleRealtimeData(msg);
+      }
+    } catch (e) {
+      // 忽略解析错误
+    }
+  };
+
+  wsRealtime.onclose = () => {
+    console.log("[realtime-ws] 连接关闭，5秒后重连");
+    scheduleReconnect();
+  };
+
+  wsRealtime.onerror = () => {
+    console.log("[realtime-ws] 连接错误");
+    wsRealtime?.close();
+  };
+}
+
+function scheduleReconnect() {
+  if (wsReconnectTimer) return;
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    connectRealtimeWS();
+  }, 5000);
+}
+
+function handleRealtimeData(msg) {
+  const realtimeNodes = msg.nodes || [];
+
+  // 更新 cachedNodes 中的实时字段
+  if (cachedNodes && Array.isArray(cachedNodes)) {
+    for (const node of cachedNodes) {
+      const rt = realtimeNodes.find((n) => n.node_id === node.id);
+      if (rt) {
+        node.total_speed_bps = rt.total_speed_bps;
+        node.active_tasks_progress = rt.active_tasks || [];
+        node.status = rt.status;
+        node.last_seen = rt.last_seen;
+      }
+    }
+  }
+
+  // 根据当前视图只重渲染需要的部分
+  if (currentView === "nodes") {
+    renderNodes(cachedNodes || []);
+  } else if (currentView === "execution") {
+    if (cachedDispatches && cachedTasks && cachedNodes) {
+      renderExecution(cachedDispatches, cachedTasks, cachedNodes);
+    }
+  } else if (currentView === "dash") {
+    if (cachedNodes) {
+      $("#dash-nodes").innerHTML = (cachedNodes.slice(0, 8).map((n) =>
+        `<div class="row-item">${dot(n.status)}<span>${n.hostname}</span><span class="mono">${n.platform}</span>${pill(n.status)}</div>`
+      ).join("")) || `<div class="hint">还没有节点。用 agent 接入或执行安装脚本。</div>`;
+    }
+  }
+}
+
+// 启动 WebSocket 连接
+connectRealtimeWS();
