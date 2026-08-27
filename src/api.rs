@@ -903,8 +903,8 @@ pub async fn trigger_workflow_handler(
     Path(id): Path<Uuid>,
 ) -> ApiResult<WorkflowRun> {
     let run = workflow_scheduler::trigger_workflow(&state, id).await?;
+    state.frontend_ws_mgr.notify_update();
     match run {
-        state.frontend_ws_mgr.notify_update();
         Some(r) => Ok(Json(ApiResponse::ok(r))),
         None => Err(AppError(anyhow::anyhow!("工作流不存在"))),
     }
