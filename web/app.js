@@ -300,9 +300,19 @@ function renderExecution(dispatches, tasks, nodes) {
     })
     .join("") || `<tr><td colspan="4" class="hint">待下发池为空</td></tr>`;
 
-  // 执行中列表
+  // 执行中列表（卡片式布局，详细实时进度）
   const now = Date.now();
-  $("#exec-running-body").innerHTML = running
+  // 从所有节点的 active_tasks_progress 构建进度映射（key: dispatch_id）
+  const progressMap = new Map();
+  for (const n of nodes) {
+    if (n.active_tasks_progress && Array.isArray(n.active_tasks_progress)) {
+      for (const p of n.active_tasks_progress) {
+        progressMap.set(p.dispatch_id, p);
+      }
+    }
+  }
+
+  const runningCards = running
     .sort((a, b) => new Date(a.claimed_at || a.updated_at) - new Date(b.claimed_at || b.updated_at))
     .map((d) => {
       const t = taskMap.get(d.task_id);
@@ -310,14 +320,54 @@ function renderExecution(dispatches, tasks, nodes) {
       const claimed = d.claimed_at ? new Date(d.claimed_at) : null;
       const elapsed = claimed ? Math.floor((now - claimed.getTime()) / 1000) : 0;
       const elapsedStr = elapsed > 60 ? `${Math.floor(elapsed / 60)}分${elapsed % 60}秒` : `${elapsed}秒`;
-      return `<tr>
-        <td>${t ? t.name : "未知任务"}<div class="mono">${t ? t.filename : d.task_id}</div></td>
-        <td>${n ? `${n.hostname}<div class="mono">${n.platform}</div>` : `<span class="mono">${d.node_id || "-"}</span>`}</td>
-        <td>${d.claimed_at ? fmtTime(d.claimed_at) : "-"}</td>
-        <td>${elapsedStr}</td>
-      </tr>`;
+
+      // 从节点实时进度中查找（dispatch_id 可能是字符串或 UUID）
+      const prog = progressMap.get(d.id) || progressMap.get(String(d.id));
+      const percent = prog ? prog.percent : 0;
+      const downloaded = prog ? prog.downloaded_bytes : 0;
+      const totalSize = prog ? prog.total_size : 0;
+      const speed = prog ? prog.speed_bps : 0;
+      const connections = prog ? prog.active_connections : 0;
+      const progElapsed = prog ? prog.elapsed_secs : elapsed;
+      const progElapsedStr = progElapsed > 60 ? `${Math.floor(progElapsed / 60)}分${Math.floor(progElapsed % 60)}秒` : `${Math.floor(progElapsed)}秒`;
+
+      return `<div class="run-card">
+        <div class="run-card-head">
+          <div class="run-card-title">
+            ${t ? t.name : "未知任务"}
+            <div class="mono">${t ? t.filename : d.task_id}</div>
+          </div>
+          <div class="run-card-node">
+            <b>${n ? n.hostname : (d.node_id || "-")}</b>
+            <div class="mono">${n ? n.platform : ""}</div>
+          </div>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-fill" style="width: ${Math.min(percent, 100).toFixed(1)}%"></div>
+        </div>
+        <div class="progress-meta">
+          <div class="item">
+            <span class="label">进度</span>
+            <span class="value">${percent.toFixed(1)}%</span>
+          </div>
+          <div class="item">
+            <span class="label">已下载 / 总大小</span>
+            <span class="value">${fmtBytes(downloaded)} / ${totalSize > 0 ? fmtBytes(totalSize) : "?"}</span>
+          </div>
+          <div class="item">
+            <span class="label">下载速度</span>
+            <span class="value speed">${fmtBytes(speed)}/s</span>
+          </div>
+          <div class="item">
+            <span class="label">连接数 / 已耗时</span>
+            <span class="value">${connections} 连接 / ${progElapsedStr}</span>
+          </div>
+        </div>
+      </div>`;
     })
-    .join("") || `<tr><td colspan="4" class="hint">暂无执行中任务</td></tr>`;
+    .join("");
+
+  $("#exec-running-cards").innerHTML = runningCards || `<div class="run-card-empty">暂无执行中任务</div>`;
 
   // 最近完成列表
   $("#exec-done-body").innerHTML = done

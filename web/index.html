@@ -30,13 +30,11 @@
     </div>
     <div class="rail-version" id="rail-version">pcdn-keeper · loading...</div>
   </aside>
-
   <main>
     <header class="top">
       <h1 id="title">总览</h1>
       <div class="top-meta" id="clock"></div>
     </header>
-
     <!-- ==================== 总览 ==================== -->
     <section id="view-dash" class="view">
       <div class="kpis" id="kpis"></div>
@@ -51,7 +49,6 @@
         </article>
       </div>
     </section>
-
     <!-- ==================== 节点 ==================== -->
     <section id="view-nodes" class="view hidden">
       <div class="toolbar">
@@ -69,7 +66,6 @@
         </table>
       </div>
     </section>
-
     <!-- ==================== 任务（任务池） ==================== -->
     <section id="view-tasks" class="view hidden">
       <article class="panel form-panel">
@@ -128,7 +124,6 @@
         </table>
       </div>
     </section>
-
     <!-- ==================== 调度（工作流） ==================== -->
     <section id="view-workflows" class="view hidden">
       <article class="panel form-panel">
@@ -150,7 +145,6 @@
               </select>
             </label>
           </div>
-
           <fieldset class="schedule-group">
             <legend>定时规则</legend>
             <div class="grid3">
@@ -163,15 +157,12 @@
                   <option value="once">一次性执行</option>
                 </select>
               </label>
-              <!-- 间隔 -->
               <label class="sch-field" data-sch="interval">间隔（分钟）
                 <input type="number" name="interval_minutes" min="1" value="60" />
               </label>
-              <!-- 每天 -->
               <label class="sch-field hidden" data-sch="daily">时间（HH:MM）
                 <input type="time" name="daily_time" value="02:00" />
               </label>
-              <!-- 每周 -->
               <label class="sch-field hidden" data-sch="weekly">星期
                 <select name="weekly_day">
                   <option value="0">周日</option>
@@ -186,33 +177,27 @@
               <label class="sch-field hidden" data-sch="weekly">时间（HH:MM）
                 <input type="time" name="weekly_time" value="02:00" />
               </label>
-              <!-- Cron -->
               <label class="sch-field hidden" data-sch="cron">Cron 表达式（5段）
                 <input name="cron_expr" placeholder="0 2 * * *" />
               </label>
-              <!-- 一次性 -->
               <label class="sch-field hidden" data-sch="once">执行时间
                 <input type="datetime-local" name="once_at" />
               </label>
             </div>
           </fieldset>
-
           <fieldset class="task-picker">
             <legend>选取任务（按次序下发）</legend>
             <div id="task-picker-list" class="check-list"></div>
           </fieldset>
-
           <fieldset class="node-picker hidden" id="node-picker-wrap">
             <legend>指定节点</legend>
             <div id="node-picker-list" class="check-list"></div>
           </fieldset>
-
           <div class="row">
             <button type="submit">创建工作流</button>
           </div>
         </form>
       </article>
-
       <div class="table-wrap">
         <table>
           <thead>
@@ -224,7 +209,6 @@
         </table>
       </div>
     </section>
-
     <!-- ==================== 工作流详情 ==================== -->
     <section id="view-workflow-detail" class="view hidden">
       <div class="toolbar">
@@ -255,36 +239,32 @@
         </article>
       </div>
     </section>
-
-    <!-- ==================== 执行（待下发池 + 执行中） ==================== -->
+    <!-- ==================== 执行（垂直排列：待下发 → 执行中 → 最近完成） ==================== -->
     <section id="view-execution" class="view hidden">
       <div class="kpis" id="exec-kpis"></div>
-      <div class="split">
-        <article class="panel">
-          <h2>待下发池 <span id="exec-pending-count" class="pill">0</span></h2>
-          <p class="hint">共享待下发任务，空闲节点自动领取</p>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr><th>任务名称</th><th>文件名</th><th>创建时间</th><th>领取策略</th></tr>
-              </thead>
-              <tbody id="exec-pending-body"></tbody>
-            </table>
-          </div>
-        </article>
-        <article class="panel">
-          <h2>执行中 <span id="exec-running-count" class="pill">0</span></h2>
-          <p class="hint">节点正在执行的任务，含领取时间和执行节点</p>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr><th>任务名称</th><th>执行节点</th><th>领取时间</th><th>已执行</th></tr>
-              </thead>
-              <tbody id="exec-running-body"></tbody>
-            </table>
-          </div>
-        </article>
-      </div>
+
+      <!-- 待下发池 -->
+      <article class="panel">
+        <h2>待下发池 <span id="exec-pending-count" class="pill">0</span></h2>
+        <p class="hint">共享待下发任务，空闲节点自动领取</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>任务名称</th><th>文件名</th><th>创建时间</th><th>领取策略</th></tr>
+            </thead>
+            <tbody id="exec-pending-body"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <!-- 执行中（卡片式布局，详细实时进度） -->
+      <article class="panel">
+        <h2>执行中 <span id="exec-running-count" class="pill">0</span></h2>
+        <p class="hint">节点正在执行的任务，实时显示下载进度</p>
+        <div id="exec-running-cards" class="running-cards"></div>
+      </article>
+
+      <!-- 最近完成 -->
       <article class="panel">
         <h2>最近完成 <span id="exec-done-count" class="pill">0</span></h2>
         <div class="table-wrap">
@@ -297,7 +277,6 @@
         </div>
       </article>
     </section>
-
     <!-- ==================== 记录 ==================== -->
     <section id="view-runs" class="view hidden">
       <div class="table-wrap">
@@ -312,7 +291,6 @@
         </table>
       </div>
     </section>
-
     <!-- ==================== 下发 ==================== -->
     <section id="view-ship" class="view hidden">
       <article class="panel">
