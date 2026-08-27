@@ -1,6 +1,6 @@
 [package]
 name = "pk"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "PK — PandaNetPL 主控，负责生成、下发并控制 SPDE 节点"
 license = "MIT"
