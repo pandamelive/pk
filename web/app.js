@@ -514,6 +514,12 @@ document.addEventListener("click", async (e) => {
   const t = e.target;
   try {
     if (t.dataset.delNode) {
+      const row = t.closest("tr");
+      const nodeName = row?.querySelector("td:nth-child(2)")?.textContent?.trim()?.split("
+")[0]?.trim() || "该节点";
+      if (!confirm(`确认移除节点「${nodeName}」？
+
+删除后节点将失去心跳，spde 会重新注册为待审批状态。`)) return;
       await api(`/api/v1/nodes/${t.dataset.delNode}`, { method: "DELETE" });
     } else if (t.dataset.editCap) {
       await editNodeCapabilities(t.dataset.editCap);
