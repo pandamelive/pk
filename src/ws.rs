@@ -14,7 +14,6 @@ use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
 // ── WebSocket 消息协议（与 SPDE 节点端一一对应） ──────────
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
@@ -41,10 +40,22 @@ pub enum ClientMsg {
         #[serde(default)]
         busy: bool,
         #[serde(default)]
+        total_speed_bps: u64,
+        #[serde(default)]
         last_error: Option<String>,
     },
     TaskStarted {
         dispatch_id: Uuid,
+    },
+    TaskProgress {
+        dispatch_id: Uuid,
+        task_name: String,
+        percent: f64,
+        downloaded_bytes: u64,
+        total_size: u64,
+        speed_bps: u64,
+        active_connections: u32,
+        elapsed_secs: f64,
     },
     TaskReport {
         dispatch_id: Option<Uuid>,
@@ -78,21 +89,44 @@ pub enum ClientMsg {
     },
 }
 
-// ── 连接管理 ──────────────────────────────────────────────
-
+// ── 连接管理 + 实时状态 ───────────────────────────────────
 pub struct NodeConn {
     pub tx: mpsc::UnboundedSender<Message>,
     pub node_id: Option<Uuid>,
 }
 
+/// 单任务实时进度（内存态）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskProgressState {
+    pub dispatch_id: Uuid,
+    pub task_name: String,
+    pub percent: f64,
+    pub downloaded_bytes: u64,
+    pub total_size: u64,
+    pub speed_bps: u64,
+    pub active_connections: u32,
+    pub elapsed_secs: f64,
+    pub updated_at: String,
+}
+
+/// 节点实时状态（内存态，不持久化）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NodeRealtime {
+    pub total_speed_bps: u64,
+    pub active_tasks: Vec<TaskProgressState>,
+    pub updated_at: String,
+}
+
 pub struct WsManager {
     conns: RwLock<HashMap<Uuid, NodeConn>>,
+    realtime: RwLock<HashMap<Uuid, NodeRealtime>>,
 }
 
 impl WsManager {
     pub fn new() -> Self {
         Self {
             conns: RwLock::new(HashMap::new()),
+            realtime: RwLock::new(HashMap::new()),
         }
     }
 
@@ -123,10 +157,50 @@ impl WsManager {
             }
         }
     }
+
+    /// 更新节点总速度
+    pub async fn update_node_speed(&self, node_id: Uuid, total_speed_bps: u64) {
+        let mut rt = self.realtime.write().await;
+        let entry = rt.entry(node_id).or_default();
+        entry.total_speed_bps = total_speed_bps;
+        entry.updated_at = Utc::now().to_rfc3339();
+    }
+
+    /// 更新单任务实时进度
+    pub async fn update_task_progress(&self, node_id: Uuid, progress: TaskProgressState) {
+        let mut rt = self.realtime.write().await;
+        let entry = rt.entry(node_id).or_default();
+        entry.updated_at = Utc::now().to_rfc3339();
+        if let Some(existing) = entry.active_tasks.iter_mut().find(|t| t.dispatch_id == progress.dispatch_id) {
+            *existing = progress;
+        } else {
+            entry.active_tasks.push(progress);
+        }
+    }
+
+    /// 任务完成时移除
+    pub async fn remove_task_progress(&self, node_id: Uuid, dispatch_id: Uuid) {
+        let mut rt = self.realtime.write().await;
+        if let Some(entry) = rt.get_mut(&node_id) {
+            entry.active_tasks.retain(|t| t.dispatch_id != dispatch_id);
+            entry.updated_at = Utc::now().to_rfc3339();
+        }
+    }
+
+    /// 获取节点实时状态
+    pub async fn get_node_realtime(&self, node_id: Uuid) -> Option<NodeRealtime> {
+        let rt = self.realtime.read().await;
+        rt.get(&node_id).cloned()
+    }
+
+    /// 获取所有节点实时状态
+    pub async fn get_all_realtime(&self) -> HashMap<Uuid, NodeRealtime> {
+        let rt = self.realtime.read().await;
+        rt.clone()
+    }
 }
 
 // ── 通知函数 ──────────────────────────────────────────────
-
 pub async fn notify_config_changed(state: &Arc<AppState>) {
     state.ws_mgr.broadcast(&ServerMsg::ConfigChanged).await;
 }
@@ -136,7 +210,6 @@ pub async fn notify_new_task(state: &Arc<AppState>) {
 }
 
 // ── WebSocket 处理 ────────────────────────────────────────
-
 pub async fn ws_handler(
     Query(params): Query<HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
@@ -151,7 +224,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, initial_node_id:
     let (mut sender, mut receiver) = socket.split();
     let conn_id = Uuid::new_v4();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-
     state.ws_mgr.register(conn_id, tx, initial_node_id).await;
 
     // URL 带了 node_id → 新协议，立即标记节点在线
@@ -227,6 +299,7 @@ async fn handle_client_msg(
             active_tasks,
             bytes_downloaded,
             busy: _,
+            total_speed_bps,
             last_error: _,
         } => {
             if let Some(nid) = node_id {
@@ -240,6 +313,8 @@ async fn handle_client_msg(
                         Ok(())
                     })
                     .await?;
+                // 更新内存中的实时总速度
+                state.ws_mgr.update_node_speed(nid, total_speed_bps).await;
             }
         }
 
@@ -251,6 +326,33 @@ async fn handle_client_msg(
                     Ok(())
                 })
                 .await?;
+        }
+
+        // ── 新协议：任务实时进度 ──
+        ClientMsg::TaskProgress {
+            dispatch_id,
+            task_name,
+            percent,
+            downloaded_bytes,
+            total_size,
+            speed_bps,
+            active_connections,
+            elapsed_secs,
+        } => {
+            if let Some(nid) = node_id {
+                let progress = TaskProgressState {
+                    dispatch_id,
+                    task_name,
+                    percent,
+                    downloaded_bytes,
+                    total_size,
+                    speed_bps,
+                    active_connections,
+                    elapsed_secs,
+                    updated_at: Utc::now().to_rfc3339(),
+                };
+                state.ws_mgr.update_task_progress(nid, progress).await;
+            }
         }
 
         // ── 新协议：任务完成报告 ──
@@ -270,6 +372,10 @@ async fn handle_client_msg(
             error_msg,
         } => {
             if let Some(nid) = node_id {
+                // 任务完成，从实时状态中移除
+                if let Some(did) = dispatch_id {
+                    state.ws_mgr.remove_task_progress(nid, did).await;
+                }
                 let req = AgentReportReq {
                     node_id: nid,
                     dispatch_id,
@@ -371,7 +477,6 @@ async fn handle_client_msg(
 }
 
 // ── 给节点生成任务配置（claim 领取后使用） ────────────────
-
 pub fn build_node_task_config(state: &AppState, node_task: &scheduler::NodeTask) -> NodeConfig {
     let defaults = &state.cfg.spde_defaults;
     let t = &node_task.task;
@@ -397,6 +502,7 @@ pub fn build_node_task_config(state: &AppState, node_task: &scheduler::NodeTask)
     if let Some(v) = o.skip_tls_verify { item.skip_tls_verify = v; }
     if let Some(v) = o.dry_run { item.dry_run = v; }
     if let Some(v) = o.save_path.clone() { item.save_path = v; }
+
     NodeConfig {
         dispatch_id: node_task.dispatch_id,
         master: format!("http://127.0.0.1:{}", state.cfg.listen.split(':').last().unwrap_or("5566")),

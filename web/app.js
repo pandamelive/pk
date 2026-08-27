@@ -583,5 +583,25 @@ $("#wf-delete")?.addEventListener("click", async () => {
   } catch (e) { alert(e.message); }
 });
 
+// 加载版本信息（pcdn-keeper 场景显示 pk + spde 组合版本）
+async function loadVersion() {
+  try {
+    const v = await api("/api/v1/version");
+    const el = document.getElementById("rail-version");
+    if (!el) return;
+    if (v.pcdn_keeper_version) {
+      el.textContent = `pcdn-keeper ${v.pcdn_keeper_version}`;
+    } else if (v.spde_version) {
+      el.textContent = `pk v${v.pk_version} / spde v${v.spde_version}`;
+    } else {
+      el.textContent = `pk v${v.pk_version}`;
+    }
+  } catch (e) {
+    const el = document.getElementById("rail-version");
+    if (el) el.textContent = "pk · version unknown";
+  }
+}
+
+loadVersion();
 refresh();
 setInterval(refresh, 5000);

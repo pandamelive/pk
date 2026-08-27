@@ -52,6 +52,12 @@ pub struct Node {
     pub active_tasks: u32,
     pub bytes_downloaded: u64,
     pub last_error: Option<String>,
+    /// 实时总速度（bps），从内存态填充
+    #[serde(default)]
+    pub total_speed_bps: u64,
+    /// 活跃任务实时进度列表，从内存态填充
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_tasks_progress: Vec<crate::ws::TaskProgressState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

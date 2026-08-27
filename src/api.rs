@@ -79,7 +79,7 @@ pub fn check_auth(state: &AppState, token: Option<&str>) -> Result<(), AppError>
 // ── 节点管理 ──────────────────────────────────────────────
 
 pub async fn list_nodes(State(state): State<Arc<AppState>>) -> ApiResult<Vec<Node>> {
-    let nodes = state
+    let mut nodes = state
         .with_conn(|conn| {
             let mut stmt = conn.prepare("SELECT id, hostname, platform, arch, version, status, last_seen, registered_at, labels, active_tasks, bytes_downloaded, last_error FROM nodes ORDER BY registered_at DESC")?;
             let nodes: Vec<Node> = stmt
@@ -101,6 +101,8 @@ pub async fn list_nodes(State(state): State<Arc<AppState>>) -> ApiResult<Vec<Nod
                         active_tasks: r.get(9)?,
                         bytes_downloaded: r.get(10)?,
                         last_error: r.get(11)?,
+                        total_speed_bps: 0,
+                        active_tasks_progress: Vec::new(),
                     })
                 })?
                 .filter_map(|r| r.ok())
@@ -108,7 +110,26 @@ pub async fn list_nodes(State(state): State<Arc<AppState>>) -> ApiResult<Vec<Nod
             Ok(nodes)
         })
         .await?;
+
+    // 从内存态填充实时状态
+    let realtime_map = state.ws_mgr.get_all_realtime().await;
+    for node in &mut nodes {
+        if let Some(rt) = realtime_map.get(&node.id) {
+            node.total_speed_bps = rt.total_speed_bps;
+            node.active_tasks_progress = rt.active_tasks.clone();
+        }
+    }
+
     Ok(Json(ApiResponse::ok(nodes)))
+}
+
+/// 查询单个节点实时状态
+pub async fn get_node_realtime(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<crate::ws::NodeRealtime> {
+    let rt = state.ws_mgr.get_node_realtime(id).await.unwrap_or_default();
+    Ok(Json(ApiResponse::ok(rt)))
 }
 
 pub async fn delete_node(
@@ -310,6 +331,25 @@ pub async fn get_overview(State(state): State<Arc<AppState>>) -> ApiResult<Overv
     state.refresh_online().await;
     let ov = state.with_conn(|conn| scheduler::overview(conn)).await?;
     Ok(Json(ApiResponse::ok(ov)))
+}
+
+/// 版本信息接口（pcdn-keeper 场景下返回 pk + spde 组合版本）
+#[derive(Debug, Serialize)]
+pub struct VersionInfo {
+    pub pk_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spde_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pcdn_keeper_version: Option<String>,
+}
+
+pub async fn get_version() -> ApiResult<VersionInfo> {
+    let info = VersionInfo {
+        pk_version: env!("CARGO_PKG_VERSION").to_string(),
+        spde_version: std::env::var("SPDE_VERSION").ok(),
+        pcdn_keeper_version: std::env::var("PCDN_KEEPER_VERSION").ok(),
+    };
+    Ok(Json(ApiResponse::ok(info)))
 }
 
 pub async fn get_defaults(State(state): State<Arc<AppState>>) -> ApiResult<SpdeDefaults> {
@@ -740,12 +780,14 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
     axum::Router::new()
         // 总览
         .route("/api/v1/overview", get(get_overview))
+        .route("/api/v1/version", get(get_version))
         .route("/api/v1/defaults", get(get_defaults))
         .route("/api/v1/host-info", get(host_info))
         // 节点
         .route("/api/v1/nodes", get(list_nodes))
         .route("/api/v1/nodes/{id}", delete(delete_node))
         .route("/api/v1/nodes/{id}/config.yaml", get(get_node_config_yaml))
+        .route("/api/v1/nodes/{id}/realtime", get(get_node_realtime))
         // 任务
         .route("/api/v1/tasks", get(list_tasks).post(create_task))
         .route("/api/v1/tasks/{id}", put(update_task).delete(delete_task))
