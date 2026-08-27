@@ -20,6 +20,8 @@ pub enum ServerMsg {
     ConfigChanged,
     NewTask,
     Ping,
+    /// 节点已被删除，spde 收到后应立即暂停所有任务并重新注册
+    NodeDeleted,
     DeleteFile {
         filename: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -154,6 +156,18 @@ impl WsManager {
         for c in conns.values() {
             if c.node_id.is_some() {
                 let _ = c.tx.send(Message::Text(text.clone().into()));
+            }
+        }
+    }
+
+    /// 向特定节点发送消息（用于删除节点时主动通知 spde）
+    pub async fn send_to_node(&self, node_id: Uuid, msg: &ServerMsg) {
+        let text = serde_json::to_string(msg).unwrap_or_default();
+        let conns = self.conns.read().await;
+        for c in conns.values() {
+            if c.node_id == Some(node_id) {
+                let _ = c.tx.send(Message::Text(text.clone().into()));
+                tracing::info!("[ws] 已向节点 {} 发送消息: {:?}", node_id, msg);
             }
         }
     }

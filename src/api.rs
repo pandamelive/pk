@@ -156,6 +156,8 @@ pub async fn delete_node(
             Ok(())
         })
         .await?;
+    // 主动通知 spde 节点已被删除，使其立即暂停任务并重新注册
+    state.ws_mgr.send_to_node(id, &crate::ws::ServerMsg::NodeDeleted).await;
     state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(())))
 }
@@ -178,9 +180,16 @@ pub async fn purge_offline_nodes(State(state): State<Arc<AppState>>) -> ApiResul
                 )?;
             }
             let n = conn.execute("DELETE FROM nodes WHERE status = 'offline'", [])?;
-            Ok(n as u64)
+            Ok((n as u64, offline_ids))
         })
         .await?;
+    let (deleted, offline_ids) = deleted;
+    // 主动通知所有被删的离线节点（如果还连着的话）
+    for nid_str in &offline_ids {
+        if let Ok(nid) = uuid::Uuid::parse_str(nid_str) {
+            state.ws_mgr.send_to_node(nid, &crate::ws::ServerMsg::NodeDeleted).await;
+        }
+    }
     state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(deleted)))
 }
