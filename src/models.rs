@@ -24,19 +24,15 @@ pub enum TaskStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AssignmentTarget {
     /// 所有在线节点各执行一份
     All,
     /// 调度到负载最低的一个节点
+    #[default]
     Any,
     /// 指定节点
     Nodes,
-}
-
-impl Default for AssignmentTarget {
-    fn default() -> Self {
-        AssignmentTarget::Any
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -352,7 +348,6 @@ pub struct AgentRegisterResp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentHeartbeatReq {
-    pub node_id: Uuid,
     #[serde(default)]
     pub active_tasks: u32,
     #[serde(default)]

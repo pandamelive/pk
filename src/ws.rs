@@ -6,90 +6,13 @@ use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+pub use pandanetos::protocol::{ClientMsg, ServerMsg};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
-
-// ── WebSocket 消息协议（与 SPDE 节点端一一对应） ──────────
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ServerMsg {
-    ConfigChanged,
-    NewTask,
-    Ping,
-    /// 节点已被删除，spde 收到后应立即暂停所有任务并重新注册
-    NodeDeleted,
-    DeleteFile {
-        filename: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        save_path: Option<String>,
-    },
-    // ── 旧协议兼容 ──
-    HeartbeatAck { timestamp: String },
-    Error { message: String },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ClientMsg {
-    // ── 新协议（SPDE 节点） ──
-    Status {
-        active_tasks: u32,
-        bytes_downloaded: u64,
-        #[serde(default)]
-        busy: bool,
-        #[serde(default)]
-        total_speed_bps: u64,
-        #[serde(default)]
-        last_error: Option<String>,
-    },
-    TaskStarted {
-        dispatch_id: Uuid,
-    },
-    TaskProgress {
-        dispatch_id: Uuid,
-        task_name: String,
-        percent: f64,
-        downloaded_bytes: u64,
-        total_size: u64,
-        speed_bps: u64,
-        active_connections: u32,
-        elapsed_secs: f64,
-    },
-    TaskReport {
-        dispatch_id: Option<Uuid>,
-        task_id: Option<Uuid>,
-        task_name: String,
-        url: String,
-        filename: String,
-        file_size: u64,
-        downloaded_bytes: u64,
-        elapsed_secs: f64,
-        avg_speed_mbps: f64,
-        status: String,
-        success_chunks: u64,
-        failed_chunks: u64,
-        #[serde(default)]
-        error_msg: Option<String>,
-    },
-    Pong,
-    // ── 旧协议兼容 ──
-    Register {
-        node_id: Uuid,
-        hostname: String,
-        platform: String,
-        arch: String,
-        version: String,
-    },
-    Heartbeat {
-        node_id: Uuid,
-        active_tasks: u32,
-        bytes_downloaded: u64,
-    },
-}
 
 // ── 连接管理 + 实时状态 ───────────────────────────────────
 pub struct NodeConn {
@@ -124,6 +47,12 @@ pub struct WsManager {
     realtime: RwLock<HashMap<Uuid, NodeRealtime>>,
 }
 
+impl Default for WsManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WsManager {
     pub fn new() -> Self {
         Self {
@@ -132,7 +61,12 @@ impl WsManager {
         }
     }
 
-    pub async fn register(&self, conn_id: Uuid, tx: mpsc::UnboundedSender<Message>, node_id: Option<Uuid>) {
+    pub async fn register(
+        &self,
+        conn_id: Uuid,
+        tx: mpsc::UnboundedSender<Message>,
+        node_id: Option<Uuid>,
+    ) {
         let mut conns = self.conns.write().await;
         conns.insert(conn_id, NodeConn { tx, node_id });
     }
@@ -185,7 +119,11 @@ impl WsManager {
         let mut rt = self.realtime.write().await;
         let entry = rt.entry(node_id).or_default();
         entry.updated_at = Utc::now().to_rfc3339();
-        if let Some(existing) = entry.active_tasks.iter_mut().find(|t| t.dispatch_id == progress.dispatch_id) {
+        if let Some(existing) = entry
+            .active_tasks
+            .iter_mut()
+            .find(|t| t.dispatch_id == progress.dispatch_id)
+        {
             *existing = progress;
         } else {
             entry.active_tasks.push(progress);
@@ -257,7 +195,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, initial_node_id:
         }
         tracing::info!("[ws] 节点连接 conn_id={} node_id={}", conn_id, nid);
     } else {
-        tracing::info!("[ws] 新连接 conn_id={} (旧协议，等待 register 消息)", conn_id);
+        tracing::info!(
+            "[ws] 新连接 conn_id={} (旧协议，等待 register 消息)",
+            conn_id
+        );
     }
 
     // 发送任务：mpsc 消息 + 每 30 秒发 Ping 保活
@@ -466,7 +407,11 @@ async fn handle_client_msg(
                     Ok(())
                 })
                 .await?;
-            tracing::info!("[ws] 节点注册(旧协议) node_id={} hostname={}", node_id, host);
+            tracing::info!(
+                "[ws] 节点注册(旧协议) node_id={} hostname={}",
+                node_id,
+                host
+            );
         }
 
         // ── 旧协议兼容：心跳 ──
@@ -511,18 +456,39 @@ pub fn build_node_task_config(state: &AppState, node_task: &scheduler::NodeTask)
         https_proxy: defaults.https_proxy.clone(),
     };
     let o = &t.overrides;
-    if let Some(v) = o.max_concurrent { item.max_concurrent = v; }
-    if let Some(v) = o.connections_per_file { item.connections_per_file = v; }
-    if let Some(v) = o.retry_times { item.retry_times = v; }
-    if let Some(v) = o.timeout { item.timeout = v; }
-    if let Some(v) = o.skip_tls_verify { item.skip_tls_verify = v; }
-    if let Some(v) = o.dry_run { item.dry_run = v; }
-    if let Some(v) = o.save_path.clone() { item.save_path = v; }
+    if let Some(v) = o.max_concurrent {
+        item.max_concurrent = v;
+    }
+    if let Some(v) = o.connections_per_file {
+        item.connections_per_file = v;
+    }
+    if let Some(v) = o.retry_times {
+        item.retry_times = v;
+    }
+    if let Some(v) = o.timeout {
+        item.timeout = v;
+    }
+    if let Some(v) = o.skip_tls_verify {
+        item.skip_tls_verify = v;
+    }
+    if let Some(v) = o.dry_run {
+        item.dry_run = v;
+    }
+    if let Some(v) = o.save_path.clone() {
+        item.save_path = v;
+    }
 
     NodeConfig {
         dispatch_id: node_task.dispatch_id,
-        master: format!("http://127.0.0.1:{}", state.cfg.listen.split(':').last().unwrap_or("5566")),
-        token: if state.cfg.token.is_empty() { None } else { Some(state.cfg.token.clone()) },
+        master: format!(
+            "http://127.0.0.1:{}",
+            state.cfg.listen.split(':').next_back().unwrap_or("5566")
+        ),
+        token: if state.cfg.token.is_empty() {
+            None
+        } else {
+            Some(state.cfg.token.clone())
+        },
         tasks: vec![item],
     }
 }
@@ -560,6 +526,12 @@ pub struct FrontendWsManager {
     dirty: std::sync::atomic::AtomicBool,
 }
 
+impl Default for FrontendWsManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FrontendWsManager {
     pub fn new() -> Self {
         Self {
@@ -581,13 +553,21 @@ impl FrontendWsManager {
     pub async fn register(&self, conn_id: Uuid, tx: mpsc::UnboundedSender<Message>) {
         let mut conns = self.conns.write().await;
         conns.insert(conn_id, tx);
-        tracing::info!("[frontend-ws] 前端连接 conn_id={}, 当前连接数={}", conn_id, conns.len());
+        tracing::info!(
+            "[frontend-ws] 前端连接 conn_id={}, 当前连接数={}",
+            conn_id,
+            conns.len()
+        );
     }
 
     pub async fn remove(&self, conn_id: Uuid) {
         let mut conns = self.conns.write().await;
         conns.remove(&conn_id);
-        tracing::info!("[frontend-ws] 前端连接关闭 conn_id={}, 当前连接数={}", conn_id, conns.len());
+        tracing::info!(
+            "[frontend-ws] 前端连接关闭 conn_id={}, 当前连接数={}",
+            conn_id,
+            conns.len()
+        );
     }
 
     /// 向所有前端连接广播消息
@@ -674,7 +654,8 @@ pub fn spawn_realtime_broadcaster(state: Arc<AppState>) {
 
             // 事件驱动：有脏数据才广播；但最多每秒兜底广播一次，确保状态同步
             let dirty = state.frontend_ws_mgr.check_and_clear_dirty();
-            let need_full_broadcast = last_full_broadcast.elapsed() >= std::time::Duration::from_secs(1);
+            let need_full_broadcast =
+                last_full_broadcast.elapsed() >= std::time::Duration::from_secs(1);
             if !dirty && !need_full_broadcast {
                 continue;
             }
@@ -720,20 +701,22 @@ pub fn spawn_realtime_broadcaster(state: Arc<AppState>) {
             // 组装前端节点状态
             let frontend_nodes: Vec<FrontendNodeState> = nodes
                 .into_iter()
-                .map(|(id, hostname, platform, _arch, version, status, last_seen)| {
-                    let node_id = Uuid::parse_str(&id).unwrap_or(Uuid::nil());
-                    let rt = realtime_map.get(&node_id).cloned().unwrap_or_default();
-                    FrontendNodeState {
-                        node_id,
-                        hostname,
-                        platform,
-                        version,
-                        status,
-                        total_speed_bps: rt.total_speed_bps,
-                        active_tasks: rt.active_tasks,
-                        last_seen,
-                    }
-                })
+                .map(
+                    |(id, hostname, platform, _arch, version, status, last_seen)| {
+                        let node_id = Uuid::parse_str(&id).unwrap_or(Uuid::nil());
+                        let rt = realtime_map.get(&node_id).cloned().unwrap_or_default();
+                        FrontendNodeState {
+                            node_id,
+                            hostname,
+                            platform,
+                            version,
+                            status,
+                            total_speed_bps: rt.total_speed_bps,
+                            active_tasks: rt.active_tasks,
+                            last_seen,
+                        }
+                    },
+                )
                 .collect();
 
             let msg = FrontendPushMsg::Realtime {

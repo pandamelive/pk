@@ -72,13 +72,13 @@ impl AppState {
             );
         }
         let internal_cleared = conn
-            .execute(
-                "DELETE FROM nodes WHERE labels LIKE '%internal=true%'",
-                [],
-            )
+            .execute("DELETE FROM nodes WHERE labels LIKE '%internal=true%'", [])
             .unwrap_or(0);
         if internal_cleared > 0 {
-            tracing::info!("启动时清除 {} 个旧内部节点并标记为已删除（容器重建后自动失效，需重新审批）", internal_cleared);
+            tracing::info!(
+                "启动时清除 {} 个旧内部节点并标记为已删除（容器重建后自动失效，需重新审批）",
+                internal_cleared
+            );
         }
 
         // 从旧 state.json 导入数据

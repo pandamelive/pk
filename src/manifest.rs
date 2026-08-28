@@ -168,6 +168,25 @@ pub fn build_capability_manifest() -> Value {
             "bytes_downloaded",
             "capabilities (spde 上报的能力清单)",
         ],
+        "status_report": {
+            "node_level": [
+                "active_tasks",
+                "bytes_downloaded",
+                "total_speed_bps",
+                "last_seen",
+                "version",
+            ],
+            "task_level": [
+                "dispatch_id",
+                "task_name",
+                "percent",
+                "speed_bps",
+                "downloaded_bytes",
+                "total_bytes",
+                "active_connections",
+                "status",
+            ],
+        },
         "build_info": {
             "rust_version": rust_version,
             "build_timestamp": build_timestamp,

@@ -2,6 +2,13 @@
 
 PandaNetPL 生态主控：生成、下发并控制 [SPDE](https://github.com/pandamelive/spde) 节点。Rust 实现，内置 Web UI。
 
+## 生态标准
+
+本项目属于 **PandaNetOS 生态项目群**，遵循全系统权威标准仓库 [PandaNetOS](https://github.com/pandamelive/PandaNetOS) 的规范：
+
+- **强制依赖** `pandanetos` 共享库（path 依赖），统一协议路径常量（`protocol::paths`）、响应格式（`ApiResponse`/`ApiError`）、错误码与配置标准，禁止维护私有协议与常量。
+- **标准一致性**：API 路径、响应格式、文件布局与文档规范均以 PandaNetOS《标准规范》为准。
+
 - 节点注册 / 心跳 / 在线状态
 - 下载任务创建与调度（任一节点 / 全部节点 / 指定节点）
 - 运行记录与流量统计

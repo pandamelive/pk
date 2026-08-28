@@ -2,7 +2,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use pk::{api, manifest, web, workflow_scheduler, ws, AppState, PkConfig};
 use std::net::SocketAddr;
-use std::path::PathBuf;use tracing_subscriber::EnvFilter;
+use std::path::PathBuf;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(name = "pk", version, about = "PK — SPDE 主控")]
@@ -76,9 +77,12 @@ async fn run_serve(config: Option<PathBuf>, listen: Option<String>) -> Result<()
     tracing::info!("Web UI: http://{addr}/");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await?;
     Ok(())
 }
 
