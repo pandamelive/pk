@@ -93,23 +93,29 @@ jobs:
           RUSTC_WRAPPER: sccache
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package binary
+      - name: Package binary (filename includes version)
+        id: package
         shell: bash
         run: |
+          VERSION="${{ github.ref_name }}"
           bin="target/${{ matrix.target }}/release/pk"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             bin="${bin}.exe"
           fi
-          cp "$bin" "${{ matrix.artifact }}"
+          # 文件名带版本号: pk-v1.0-x86_64-linux-musl
+          artifact_name="pk-${VERSION}-$(echo '${{ matrix.artifact }}' | sed 's/^pk-//')"
+          cp "$bin" "$artifact_name"
           if [ "${{ matrix.os }}" != "windows-latest" ]; then
-            chmod +x "${{ matrix.artifact }}"
+            chmod +x "$artifact_name"
           fi
+          echo "artifact_name=$artifact_name" >> $GITHUB_OUTPUT
+          echo "Packaged: $artifact_name"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ steps.package.outputs.artifact_name }}
 
   release:
     needs: build
@@ -125,7 +131,7 @@ jobs:
         with:
           name: PK ${{ github.ref_name }}
           generate_release_notes: true
-          files: pk-*
+          files: pk-v*
 
   dispatch-pcdn-keeper:
     needs: release
