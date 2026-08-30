@@ -1,6 +1,6 @@
 # PK
 
-PandaNetPL 生态主控：生成、下发并控制 [SPDE](https://github.com/pandamelive/spde) 节点。Rust 实现，内置 Web UI。
+PandaNetOS 生态主控：生成、下发并控制 [SPDE](https://github.com/pandamelive/spde) 节点。Rust 实现，内置 Web UI。
 
 ## 生态标准
 
