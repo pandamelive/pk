@@ -114,12 +114,11 @@ impl WsManager {
         entry.updated_at = Utc::now().to_rfc3339();
     }
 
-    /// 更新单任务实时进度（纯实时透传，不做任何平滑处理）
+    /// 更新单任务实时进度
     pub async fn update_task_progress(&self, node_id: Uuid, progress: TaskProgressState) {
         let mut rt = self.realtime.write().await;
         let entry = rt.entry(node_id).or_default();
         entry.updated_at = Utc::now().to_rfc3339();
-
         if let Some(existing) = entry
             .active_tasks
             .iter_mut()

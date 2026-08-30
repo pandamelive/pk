@@ -6,7 +6,7 @@ description = "PK — PandaNetPL 主控，负责生成、下发并控制 SPDE �
 license = "MIT"
 
 [dependencies]
-pandanetos = { path = "../PandaNetOS/crates/pandanetos" }
+pandanetos = { path = "../pandanetos/crates/pandanetos" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "macros", "ws"] }
 chrono = { version = "0.4", features = ["serde"] }

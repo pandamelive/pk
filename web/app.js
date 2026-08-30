@@ -696,38 +696,6 @@ setInterval(() => { const el = $("#clock"); if (el) el.textContent = new Date().
 let wsRealtime = null;
 let wsReconnectTimer = null;
 
-// 将实时数据应用到 cachedNodes（纯实时透传）
-function applyRealtimeToNodes(msg) {
-  const realtimeNodes = msg.nodes || [];
-  if (cachedNodes && Array.isArray(cachedNodes)) {
-    for (const node of cachedNodes) {
-      const rt = realtimeNodes.find((n) => n.node_id === node.id);
-      if (rt) {
-        node.total_speed_bps = rt.total_speed_bps;
-        node.active_tasks_progress = rt.active_tasks || [];
-        node.status = rt.status;
-        node.last_seen = rt.last_seen;
-      }
-    }
-  }
-}
-// 执行实时重渲染（只重渲染当前页面）
-function doRealtimeRerender() {
-  if (currentView === "nodes") {
-    renderNodes(cachedNodes || []);
-  } else if (currentView === "execution") {
-    if (cachedDispatches && cachedTasks && cachedNodes) {
-      renderExecution(cachedDispatches, cachedTasks, cachedNodes);
-    }
-  } else if (currentView === "dash") {
-    if (cachedNodes) {
-      $("#dash-nodes").innerHTML = (cachedNodes.slice(0, 8).map((n) =>
-        `<div class="row-item">${dot(n.status)}<span>${n.hostname}</span><span class="mono">${n.platform}</span>${pill(n.status)}</div>`
-      ).join("")) || `<div class="hint">还没有节点。用 agent 接入或执行安装脚本。</div>`;
-    }
-  }
-}
-
 function connectRealtimeWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const wsUrl = `${proto}//${location.host}/api/v1/realtime/ws`;
@@ -778,13 +746,42 @@ function scheduleReconnect() {
 
 // 全量刷新节流（避免WebSocket频繁触发导致HTTP请求风暴）
 let lastFullRefresh = 0;
-const FULL_REFRESH_INTERVAL = 2000; // 全量刷新最少2秒一次
-function handleRealtimeData(msg) {
-  // 纯实时渲染，收到数据立即重渲染
-  applyRealtimeToNodes(msg);
-  doRealtimeRerender();
+const FULL_REFRESH_INTERVAL = 50; // 最少50ms一次全量刷新
 
-  // 节流全量刷新 - 确保任务状态、分发列表、工作流等也是最新的
+function handleRealtimeData(msg) {
+  const realtimeNodes = msg.nodes || [];
+
+  // 1. 立即更新节点实时字段（速度、进度）- 50ms级别，进度条流畅
+  if (cachedNodes && Array.isArray(cachedNodes)) {
+    for (const node of cachedNodes) {
+      const rt = realtimeNodes.find((n) => n.node_id === node.id);
+      if (rt) {
+        node.total_speed_bps = rt.total_speed_bps;
+        node.active_tasks_progress = rt.active_tasks || [];
+        node.status = rt.status;
+        node.last_seen = rt.last_seen;
+      }
+    }
+  }
+
+  // 2. 立即重渲染当前页面（用更新后的节点数据）- 进度条、速度实时显示
+  if (currentView === "nodes") {
+    renderNodes(cachedNodes || []);
+  } else if (currentView === "execution") {
+    if (cachedDispatches && cachedTasks && cachedNodes) {
+      renderExecution(cachedDispatches, cachedTasks, cachedNodes);
+    }
+  } else if (currentView === "dash") {
+    if (cachedNodes) {
+      $("#dash-nodes").innerHTML = (cachedNodes.slice(0, 8).map((n) =>
+        `<div class="row-item">${dot(n.status)}<span>${n.hostname}</span><span class="mono">${n.platform}</span>${pill(n.status)}</div>`
+      ).join("")) || `<div class="hint">还没有节点。用 agent 接入或执行安装脚本。</div>`;
+    }
+  }
+
+  // 3. 节流全量刷新 - 确保任务状态、分发列表、工作流等也是最新的
+  //    任何数据变化（创建任务、状态变更等）都会触发WebSocket推送
+  //    全量刷新最多2秒一次，避免HTTP请求风暴
   const now = Date.now();
   if (now - lastFullRefresh >= FULL_REFRESH_INTERVAL) {
     lastFullRefresh = now;
