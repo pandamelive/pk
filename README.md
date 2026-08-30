@@ -116,3 +116,7 @@ spde_defaults:
   connections_per_file: 8
   save_path: "./download"
 ```
+
+## License
+
+MIT
