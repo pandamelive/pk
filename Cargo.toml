@@ -30,5 +30,7 @@ name = "pk"
 path = "src/main.rs"
 
 [profile.release]
-codegen-units = 256
-lto = false
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
