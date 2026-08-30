@@ -1,12 +1,12 @@
 [package]
 name = "pk"
-version = "1.1.0"
+version = "1.1.2"
 edition = "2021"
 description = "PK — PandaNetPL 主控，负责生成、下发并控制 SPDE 节点"
 license = "MIT"
 
 [dependencies]
-pandanetos = { path = "../PandaNetOS/crates/pandanetos" }
+pandanetos = { path = "../pandanetos/crates/pandanetos" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "macros", "ws"] }
 chrono = { version = "0.4", features = ["serde"] }
