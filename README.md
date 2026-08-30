@@ -4,10 +4,34 @@ PandaNetPL 生态主控：生成、下发并控制 [SPDE](https://github.com/pan
 
 ## 生态标准
 
-本项目属于 **PandaNetOS 生态项目群**，遵循全系统权威标准仓库 [PandaNetOS](https://github.com/pandamelive/PandaNetOS) 的规范：
+本项目属于 **PandaNetOS 生态项目群**，遵循全系统权威标准仓库 [PandaNetOS](https://github.com/PandaNetOS/PandaNetOS) 的规范。
 
-- **强制依赖** `pandanetos` 共享库（path 依赖），统一协议路径常量（`protocol::paths`）、响应格式（`ApiResponse`/`ApiError`）、错误码与配置标准，禁止维护私有协议与常量。
+### 标准库路径约定
+
+强制依赖 `pandanetos` 共享标准库，使用 **path 依赖**，目录布局固定：
+
+```
+<workspace>/
+├── PandaNetOS/              # 标准库仓库（必须与 pk 同级）
+│   └── crates/pandanetos/
+└── pk/                      # 本仓库
+    └── Cargo.toml           # pandanetos = { path = "../PandaNetOS/crates/pandanetos" }
+```
+
+`Cargo.toml` 中的依赖声明：
+
+```toml
+[dependencies]
+pandanetos = { path = "../PandaNetOS/crates/pandanetos" }
+```
+
+> 克隆本仓库后，需同时克隆 `PandaNetOS/PandaNetOS` 到同级目录，否则 `cargo build` 会因找不到 path 依赖而失败。
+
+### 规范要求
+
+- **强制依赖** `pandanetos` 共享库，统一协议路径常量（`protocol::paths`）、响应格式（`ApiResponse`/`ApiError`）、错误码与配置标准，**禁止**维护私有协议与常量。
 - **标准一致性**：API 路径、响应格式、文件布局与文档规范均以 PandaNetOS《标准规范》为准。
+- 一行导入所有常用类型：`use pandanetos::prelude::*;`
 
 - 节点注册 / 心跳 / 在线状态
 - 下载任务创建与调度（任一节点 / 全部节点 / 指定节点）
