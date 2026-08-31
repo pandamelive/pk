@@ -9,10 +9,8 @@ pub struct PkConfig {
     pub listen: String,
     #[serde(default)]
     pub data_dir: Option<String>,
-    /// 节点超过该秒数未心跳则标记 offline
     #[serde(default = "default_heartbeat_timeout")]
     pub heartbeat_timeout_secs: u64,
-    /// 可选共享密钥；非空时 agent 与 Web API 需带 Authorization: Bearer <token>
     #[serde(default)]
     pub token: String,
     #[serde(default)]
@@ -33,7 +31,7 @@ pub struct SpdeDefaults {
     pub skip_tls_verify: bool,
     #[serde(default = "default_connections")]
     pub connections_per_file: u32,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub dry_run: bool,
     #[serde(default = "default_save_path")]
     pub save_path: String,
@@ -52,7 +50,7 @@ impl Default for SpdeDefaults {
             timeout: default_timeout(),
             skip_tls_verify: false,
             connections_per_file: default_connections(),
-            dry_run: false,
+            dry_run: true,
             save_path: default_save_path(),
             http_proxy: String::new(),
             https_proxy: String::new(),
@@ -110,7 +108,7 @@ spde_defaults:
   timeout: 1800
   skip_tls_verify: false
   connections_per_file: 8
-  dry_run: false
+  dry_run: true
   save_path: "./download"
   http_proxy: ""
   https_proxy: ""
