@@ -1093,6 +1093,48 @@ pub async fn list_dispatches(State(state): State<Arc<AppState>>) -> ApiResult<Ve
 
 // ── 二进制分发 ─────────────────────────────────
 
+#[derive(Serialize)]
+pub struct ArtifactInfo {
+    pub platform: String,
+    pub filename: String,
+    pub present: bool,
+    pub size: u64,
+}
+
+pub async fn list_artifacts(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<Vec<ArtifactInfo>>> {
+    let platforms = [
+        "windows-x86_64",
+        "linux-x86_64",
+        "linux-aarch64",
+        "macos-x86_64",
+        "macos-aarch64",
+    ];
+    let mut artifacts = Vec::new();
+    for platform in platforms {
+        if let Some(filename) = artifact_filename(platform) {
+            let file_path = state.artifacts_dir.join(filename);
+            let (present, size) = if file_path.exists() {
+                let size = tokio::fs::metadata(&file_path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                (true, size)
+            } else {
+                (false, 0)
+            };
+            artifacts.push(ArtifactInfo {
+                platform: platform.to_string(),
+                filename: filename.to_string(),
+                present,
+                size,
+            });
+        }
+    }
+    Json(ApiResponse::ok(artifacts))
+}
+
 pub async fn serve_artifact(
     State(state): State<Arc<AppState>>,
     Path(platform): Path<String>,
@@ -1179,6 +1221,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/v1/agent/ws", get(ws::ws_handler))
         .route("/api/v1/realtime/ws", get(ws::frontend_ws_handler))
         // 二进制分发
+        .route("/api/v1/artifacts", get(list_artifacts))
         .route("/api/v1/artifacts/{platform}", get(serve_artifact))
         .with_state(state)
 }
