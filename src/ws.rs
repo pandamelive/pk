@@ -641,15 +641,18 @@ async fn handle_frontend_socket(socket: WebSocket, state: Arc<AppState>) {
 
 /// 启动实时状态广播任务（每秒向所有前端推送一次）
 /// P3-20 从数据库查询节点基本信息（抽成函数，便于缓存复用）
+/// 节点基本信息：(id, hostname, platform, arch, version, status, last_seen)
+type NodeInfo = (String, String, String, String, String, String, String);
+
 async fn query_nodes_from_db(
     state: &Arc<AppState>,
-) -> anyhow::Result<Vec<(String, String, String, String, String, String, String)>> {
+) -> anyhow::Result<Vec<NodeInfo>> {
     state
         .with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, hostname, platform, arch, version, status, last_seen FROM nodes ORDER BY hostname",
             )?;
-            let nodes: Vec<(String, String, String, String, String, String, String)> = stmt
+            let nodes: Vec<NodeInfo> = stmt
                 .query_map([], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
@@ -675,10 +678,7 @@ pub fn spawn_realtime_broadcaster(state: Arc<AppState>) {
         let mut last_full_broadcast = std::time::Instant::now();
         // P3-20 节点基本信息缓存：避免每次广播都查数据库
         // 缓存 1 秒，节点基本信息（hostname/platform/version/status/last_seen）变化不频繁
-        let mut nodes_cache: Option<(
-            std::time::Instant,
-            Vec<(String, String, String, String, String, String, String)>,
-        )> = None;
+        let mut nodes_cache: Option<(std::time::Instant, Vec<NodeInfo>)> = None;
         let cache_ttl = std::time::Duration::from_secs(1);
         loop {
             interval.tick().await;
