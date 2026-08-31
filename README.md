@@ -128,10 +128,6 @@ spde_defaults:
   save_path: "./download"
 ```
 
-## License
-
-MIT
-
 ## 开发指南
 
 ### 环境要求
@@ -160,3 +156,8 @@ bash ../PandaNetOS/scripts/check_compliance.sh .
 ## 贡献指南
 
 欢迎提交 Issue 和 Pull Request。提交前请确保通过合规检查。
+
+
+## License
+
+MIT
