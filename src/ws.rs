@@ -640,11 +640,44 @@ async fn handle_frontend_socket(socket: WebSocket, state: Arc<AppState>) {
 }
 
 /// 启动实时状态广播任务（每秒向所有前端推送一次）
+/// P3-20 从数据库查询节点基本信息（抽成函数，便于缓存复用）
+/// 节点基本信息：(id, hostname, platform, arch, version, status, last_seen)
+type NodeInfo = (String, String, String, String, String, String, String);
+
+async fn query_nodes_from_db(state: &Arc<AppState>) -> anyhow::Result<Vec<NodeInfo>> {
+    state
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, hostname, platform, arch, version, status, last_seen FROM nodes ORDER BY hostname",
+            )?;
+            let nodes: Vec<NodeInfo> = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(nodes)
+        })
+        .await
+}
+
 pub fn spawn_realtime_broadcaster(state: Arc<AppState>) {
     tokio::spawn(async move {
         // 50ms 检查一次脏标志，事件驱动 + 节流，人眼感知不到延迟
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
         let mut last_full_broadcast = std::time::Instant::now();
+        // P3-20 节点基本信息缓存：避免每次广播都查数据库
+        // 缓存 1 秒，节点基本信息（hostname/platform/version/status/last_seen）变化不频繁
+        let mut nodes_cache: Option<(std::time::Instant, Vec<NodeInfo>)> = None;
+        let cache_ttl = std::time::Duration::from_secs(1);
         loop {
             interval.tick().await;
             let conn_count = state.frontend_ws_mgr.conn_count().await;
@@ -663,35 +696,34 @@ pub fn spawn_realtime_broadcaster(state: Arc<AppState>) {
                 last_full_broadcast = std::time::Instant::now();
             }
 
-            // 从数据库获取节点基本信息
-            let nodes_result = state
-                .with_conn(|conn| {
-                    let mut stmt = conn.prepare(
-                        "SELECT id, hostname, platform, arch, version, status, last_seen FROM nodes ORDER BY hostname",
-                    )?;
-                    let nodes: Vec<(String, String, String, String, String, String, String)> = stmt
-                        .query_map([], |r| {
-                            Ok((
-                                r.get::<_, String>(0)?,
-                                r.get::<_, String>(1)?,
-                                r.get::<_, String>(2)?,
-                                r.get::<_, String>(3)?,
-                                r.get::<_, String>(4)?,
-                                r.get::<_, String>(5)?,
-                                r.get::<_, String>(6)?,
-                            ))
-                        })?
-                        .filter_map(|r| r.ok())
-                        .collect();
-                    Ok(nodes)
-                })
-                .await;
-
-            let nodes = match nodes_result {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!("[frontend-ws] 查询节点失败: {}", e);
-                    continue;
+            // P3-20 从缓存或数据库获取节点基本信息
+            let nodes = if let Some((cache_time, cached)) = &nodes_cache {
+                if cache_time.elapsed() < cache_ttl {
+                    cached.clone()
+                } else {
+                    // 缓存过期，查数据库
+                    match query_nodes_from_db(&state).await {
+                        Ok(n) => {
+                            nodes_cache = Some((std::time::Instant::now(), n.clone()));
+                            n
+                        }
+                        Err(e) => {
+                            tracing::warn!("[frontend-ws] 查询节点失败: {}", e);
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                // 无缓存，查数据库
+                match query_nodes_from_db(&state).await {
+                    Ok(n) => {
+                        nodes_cache = Some((std::time::Instant::now(), n.clone()));
+                        n
+                    }
+                    Err(e) => {
+                        tracing::warn!("[frontend-ws] 查询节点失败: {}", e);
+                        continue;
+                    }
                 }
             };
 
