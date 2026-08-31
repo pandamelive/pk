@@ -17,5 +17,6 @@ jobs:
       project_name: PK
       dispatch_downstream: true
       downstream_repo: pcdn-keeper
+      version: ${{ inputs.version }}
     secrets:
       PAT_FOR_DOWNSTREAM: ${{ secrets.PAT_FOR_DOWNSTREAM }}
