@@ -533,7 +533,7 @@ function switchView(view) {
   const el = $(`#view-${view}`);
   if (el) el.classList.remove("hidden");
   $$(".nav").forEach((b) => b.classList.toggle("on", b.dataset.view === view));
-  const titles = { dash: "总览", nodes: "节点", tasks: "任务", workflows: "调度", execution: "执行", workflow-detail: "工作流详情", runs: "记录", ship: "部署hub" };
+  const titles = { dash: "总览", nodes: "节点", tasks: "任务", workflows: "调度", execution: "执行", "workflow-detail": "工作流详情", runs: "记录", ship: "部署hub" };
   $("#title").textContent = titles[view] || view;
 }
 
