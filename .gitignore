@@ -6,3 +6,7 @@ pk-data
 .idea/
 *.swp
 *.swo
+
+# 调试输出文件
+check_output*.txt
+*.log
