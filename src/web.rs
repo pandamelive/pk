@@ -64,10 +64,7 @@ async fn js() -> impl IntoResponse {
 
 async fn favicon() -> impl IntoResponse {
     let body = dev_read_bytes("favicon.png").unwrap_or_else(|| FAVICON.to_vec());
-    (
-        [(header::CONTENT_TYPE, "image/png")],
-        body,
-    )
+    ([(header::CONTENT_TYPE, "image/png")], body)
 }
 
 pub fn not_found() -> impl IntoResponse {
