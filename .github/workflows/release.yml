@@ -1,10 +1,12 @@
 name: Release PK
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 1.1.7）'
+        required: true
+        type: string
 
 permissions:
   contents: write
