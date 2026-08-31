@@ -107,7 +107,7 @@ async function editNodeCapabilities(nodeId) {
   if (!node) return;
   const mc = prompt("最大并发任务数（留空=用全局默认）:", node.max_concurrent ?? "");
   if (mc === null) return;
-  const mb = prompt("最大带宽上限 MB/s（留空=不限）:", node.max_bandwidth_bps ? (node.max_bandwidth_bps / 1024 / 1024).toFixed(0) : "");
+  const mb = prompt("最大带宽上限 MB/s（留空=不限）:", node.max_bandwidth_bps ? (n.max_bandwidth_bps / 1024 / 1024).toFixed(0) : "");
   if (mb === null) return;
   const body = {};
   if (mc.trim()) body.max_concurrent = parseInt(mc);
@@ -143,7 +143,7 @@ function buildOverridesFromForm(fd) {
   const to = num("timeout"); if (to !== undefined) overrides.timeout = to;
   const sp = fd.get("save_path")?.toString().trim(); if (sp) overrides.save_path = sp;
   if (fd.get("skip_tls_verify") === "on") overrides.skip_tls_verify = true;
-  if (fd.get("dry_run") === "on") overrides.dry_run = false;
+  if (fd.get("dry_run") === "on") overrides.dry_run = true;
   return overrides;
 }
 
@@ -418,7 +418,7 @@ function switchView(view) {
   const el = $(`#view-${view}`);
   if (el) el.classList.remove("hidden");
   $$(".nav").forEach((b) => b.classList.toggle("on", b.dataset.view === view));
-  const titles = { dash: "总览", nodes: "节点", tasks: "任务", workflows: "调度", execution: "执行", "workflow-detail": "工作流详情", runs: "记录", ship: "部署hub" };
+  const titles = { dash: "总览", nodes: "节点", tasks: "任务", workflows: "调度", execution: "执行", workflow-detail: "工作流详情", runs: "记录", ship: "部署hub" };
   $("#title").textContent = titles[view] || view;
 }
 
