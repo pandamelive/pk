@@ -496,6 +496,21 @@ pub async fn delete_task(
     Ok(Json(ApiResponse::ok(())))
 }
 
+/// 取消任务（不删除任务记录，仅将 pending/running 状态的 dispatch 标记为 cancelled）
+pub async fn cancel_task_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<()> {
+    state
+        .with_transaction(|conn| {
+            scheduler::cancel_task(conn, id)?;
+            Ok(())
+        })
+        .await?;
+    state.frontend_ws_mgr.notify_update();
+    Ok(Json(ApiResponse::ok(())))
+}
+
 // ── 运行记录 ──────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1191,6 +1206,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         // 任务
         .route(paths::TASKS, get(list_tasks).post(create_task))
         .route(paths::TASK_DETAIL, put(update_task).delete(delete_task))
+        .route("/api/v1/tasks/{id}/cancel", post(cancel_task_handler))
         // 运行记录
         .route("/api/v1/runs", get(list_runs))
         // 下发记录
