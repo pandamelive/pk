@@ -46,6 +46,7 @@ async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json" };
   const token = $("#token")?.value?.trim();
   if (token) headers["Authorization"] = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
+  const silent = opts.silent === true;
   try {
     const res = await fetch(API_BASE + path, { ...opts, headers: { ...headers, ...(opts.headers || {}) } });
     if (!res.ok) {
@@ -56,8 +57,8 @@ async function api(path, opts = {}) {
     const json = await res.json();
     return json.data !== undefined ? json.data : json;
   } catch (e) {
-    // P2-15 API 失败全局提示
-    showToast(`请求失败: ${e.message}`, "error");
+    // P2-15 API 失败全局提示；silent=true 时不弹 toast（调用方自行处理）
+    if (!silent) showToast(`请求失败: ${e.message}`, "error");
     throw e;
   }
 }
@@ -205,7 +206,7 @@ async function editNodeCapabilities(nodeId) {
   if (!node) return;
   const mc = prompt("最大并发任务数（留空=用全局默认）:", node.max_concurrent ?? "");
   if (mc === null) return;
-  const mb = prompt("最大带宽上限 MB/s（留空=不限）:", node.max_bandwidth_bps ? (n.max_bandwidth_bps / 1024 / 1024).toFixed(0) : "");
+  const mb = prompt("最大带宽上限 MB/s（留空=不限）:", node.max_bandwidth_bps ? (node.max_bandwidth_bps / 1024 / 1024).toFixed(0) : "");
   if (mb === null) return;
   const body = {};
   if (mc.trim()) body.max_concurrent = parseInt(mc);
@@ -546,10 +547,10 @@ async function refresh() {
       api("/api/v1/nodes"),
       api("/api/v1/tasks"),
       api("/api/v1/runs?limit=100"),
-      api("/api/v1/artifacts").catch(() => []),
-      api("/api/v1/defaults").catch(() => null),
-      api("/api/v1/workflows").catch(() => []),
-      api("/api/v1/dispatches").catch(() => []),
+      api("/api/v1/artifacts", { silent: true }).catch(() => []),
+      api("/api/v1/defaults", { silent: true }).catch(() => null),
+      api("/api/v1/workflows", { silent: true }).catch(() => []),
+      api("/api/v1/dispatches", { silent: true }).catch(() => []),
     ]);
     cachedTasks = tasks;
     cachedNodes = nodes;
@@ -674,7 +675,7 @@ document.addEventListener("click", async (e) => {
       e.preventDefault();
       renderWorkflowDetail(t.dataset.wfId);
     } else if (t.id === "purge-offline") {
-      await api("/api/v1/nodes", { method: "DELETE" });
+      await api("/api/v1/nodes/offline", { method: "DELETE" });
     } else {
       return;
     }
