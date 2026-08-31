@@ -644,9 +644,7 @@ async fn handle_frontend_socket(socket: WebSocket, state: Arc<AppState>) {
 /// 节点基本信息：(id, hostname, platform, arch, version, status, last_seen)
 type NodeInfo = (String, String, String, String, String, String, String);
 
-async fn query_nodes_from_db(
-    state: &Arc<AppState>,
-) -> anyhow::Result<Vec<NodeInfo>> {
+async fn query_nodes_from_db(state: &Arc<AppState>) -> anyhow::Result<Vec<NodeInfo>> {
     state
         .with_conn(|conn| {
             let mut stmt = conn.prepare(
