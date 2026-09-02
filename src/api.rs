@@ -2,8 +2,8 @@ use crate::config::{PkConfig, SpdeDefaults};
 use crate::models::*;
 use crate::scheduler;
 use crate::store::{artifact_filename, detect_host_platform, AppState};
-use crate::ws;
 use crate::workflow_scheduler;
+use crate::ws;
 use anyhow::Result;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -266,17 +266,17 @@ pub async fn list_runs(
     let runs = state
         .with_conn(|conn| {
             let runs: Vec<RunRecord> = if let Some(nid) = q.node_id {
-                conn.query_map(
+                let mut stmt = conn.prepare(
                     "SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, file_size, downloaded_bytes, elapsed_secs, avg_speed_mbps, status, success_chunks, failed_chunks, error_msg, timestamp FROM runs WHERE node_id = ?1 ORDER BY timestamp DESC LIMIT ?2",
-                    params![nid.to_string(), q.limit],
-                    map_run,
-                )?.filter_map(|r| r.ok()).collect()
+                )?;
+                let rows = stmt.query_map(params![nid.to_string(), q.limit], map_run)?;
+                rows.filter_map(|r| r.ok()).collect()
             } else {
-                conn.query_map(
+                let mut stmt = conn.prepare(
                     "SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, file_size, downloaded_bytes, elapsed_secs, avg_speed_mbps, status, success_chunks, failed_chunks, error_msg, timestamp FROM runs ORDER BY timestamp DESC LIMIT ?1",
-                    params![q.limit],
-                    map_run,
-                )?.filter_map(|r| r.ok()).collect()
+                )?;
+                let rows = stmt.query_map(params![q.limit], map_run)?;
+                rows.filter_map(|r| r.ok()).collect()
             };
             Ok(runs)
         })
@@ -301,7 +301,10 @@ fn map_run(r: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
         success_chunks: r.get(12)?,
         failed_chunks: r.get(13)?,
         error_msg: r.get(14)?,
-        timestamp: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(15)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
+        timestamp: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(15)?)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(Utc::now()),
     })
 }
 
@@ -373,8 +376,15 @@ pub async fn agent_fetch_config(
     // 拉模式：节点通过 /agent/claim 领取任务，这里返回空配置
     let cfg = NodeConfig {
         dispatch_id: Uuid::nil(),
-        master: format!("http://127.0.0.1:{}", state.cfg.listen.split(':').last().unwrap_or("5566")),
-        token: if state.cfg.token.is_empty() { None } else { Some(state.cfg.token.clone()) },
+        master: format!(
+            "http://127.0.0.1:{}",
+            state.cfg.listen.split(':').last().unwrap_or("5566")
+        ),
+        token: if state.cfg.token.is_empty() {
+            None
+        } else {
+            Some(state.cfg.token.clone())
+        },
         tasks: vec![],
     };
     Ok(Json(ApiResponse::ok(cfg)))
@@ -408,9 +418,11 @@ pub async fn agent_claim(
             // 池子空，返回 204
             (StatusCode::NO_CONTENT, Json(ApiResponse::<()>::ok(()))).into_response()
         }
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::<()>::err(e.to_string()))).into_response()
-        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::<()>::err(e.to_string())),
+        )
+            .into_response(),
     }
 }
 
@@ -436,14 +448,26 @@ fn map_workflow(r: &rusqlite::Row) -> rusqlite::Result<Workflow> {
         id: r.get::<_, String>(0)?.parse().unwrap(),
         name: r.get(1)?,
         enable: r.get::<_, i64>(2)? != 0,
-        schedule: serde_json::from_str(&schedule_str).unwrap_or(WorkflowSchedule::Once { at: Utc::now() }),
+        schedule: serde_json::from_str(&schedule_str)
+            .unwrap_or(WorkflowSchedule::Once { at: Utc::now() }),
         task_ids: serde_json::from_str(&task_ids_str).unwrap_or_default(),
         target: serde_json::from_str(&target_str).unwrap_or_default(),
         node_ids: serde_json::from_str(&node_ids_str).unwrap_or_default(),
-        next_run_at: r.get::<_, Option<String>>(7)?.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-        last_run_at: r.get::<_, Option<String>>(8)?.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
+        next_run_at: r.get::<_, Option<String>>(7)?.and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        }),
+        last_run_at: r.get::<_, Option<String>>(8)?.and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        }),
         last_run_status: r.get(9)?,
-        created_at: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(10)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
+        created_at: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(10)?)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(Utc::now()),
     })
 }
 
@@ -471,13 +495,16 @@ pub async fn create_workflow(
             conn.execute(
                 "INSERT INTO workflows VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                 params![
-                    wf.id.to_string(), wf.name, wf.enable,
+                    wf.id.to_string(),
+                    wf.name,
+                    wf.enable,
                     serde_json::to_string(&wf.schedule)?,
                     serde_json::to_string(&wf.task_ids)?,
                     serde_json::to_string(&wf.target)?,
                     serde_json::to_string(&wf.node_ids)?,
                     wf.next_run_at.map(|t| t.to_rfc3339()),
-                    None::<String>, None::<String>,
+                    None::<String>,
+                    None::<String>,
                     wf.created_at.to_rfc3339(),
                 ],
             )?;
@@ -533,8 +560,14 @@ pub async fn delete_workflow(
 ) -> ApiResult<()> {
     state
         .with_transaction(|conn| {
-            conn.execute("DELETE FROM workflow_runs WHERE workflow_id = ?1", params![id.to_string()])?;
-            conn.execute("DELETE FROM workflows WHERE id = ?1", params![id.to_string()])?;
+            conn.execute(
+                "DELETE FROM workflow_runs WHERE workflow_id = ?1",
+                params![id.to_string()],
+            )?;
+            conn.execute(
+                "DELETE FROM workflows WHERE id = ?1",
+                params![id.to_string()],
+            )?;
             Ok(())
         })
         .await?;
@@ -574,7 +607,10 @@ fn map_workflow_run(r: &rusqlite::Row) -> rusqlite::Result<WorkflowRun> {
         id: r.get::<_, String>(0)?.parse().unwrap(),
         workflow_id: r.get::<_, String>(1)?.parse().unwrap(),
         workflow_name: r.get(2)?,
-        triggered_at: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(3)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
+        triggered_at: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(3)?)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(Utc::now()),
         status: r.get(4)?,
         task_count: r.get(5)?,
         success_count: r.get(6)?,
@@ -595,9 +631,7 @@ pub async fn trigger_workflow_handler(
     }
 }
 
-pub async fn list_workflow_runs(
-    State(state): State<Arc<AppState>>,
-) -> ApiResult<Vec<WorkflowRun>> {
+pub async fn list_workflow_runs(State(state): State<Arc<AppState>>) -> ApiResult<Vec<WorkflowRun>> {
     let runs = state
         .with_conn(|conn| {
             let mut stmt = conn.prepare("SELECT id, workflow_id, workflow_name, triggered_at, status, task_count, success_count, failed_count, dispatch_ids, error_msg FROM workflow_runs ORDER BY triggered_at DESC LIMIT 100")?;
@@ -640,11 +674,12 @@ pub async fn list_dispatches(State(state): State<Arc<AppState>>) -> ApiResult<Ve
 
 // ── 静态文件 / 二进制分发 ─────────────────────────────────
 
-pub async fn serve_web(
-    State(state): State<Arc<AppState>>,
-    Path(path): Path<String>,
-) -> Response {
-    let safe_path = if path.is_empty() { "index.html".into() } else { path };
+pub async fn serve_web(State(state): State<Arc<AppState>>, Path(path): Path<String>) -> Response {
+    let safe_path = if path.is_empty() {
+        "index.html".into()
+    } else {
+        path
+    };
     let web_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -682,18 +717,121 @@ pub async fn serve_artifact(
         let content = tokio::fs::read(&file_path).await.unwrap_or_default();
         (
             [("content-type", "application/octet-stream")],
-            [("content-disposition", format!("attachment; filename=\"{}\"", filename))],
+            [(
+                "content-disposition",
+                format!("attachment; filename=\"{}\"", filename),
+            )],
             content,
         )
             .into_response()
     } else {
-        (StatusCode::NOT_FOUND, format!("未找到 {} 平台的二进制", platform)).into_response()
+        (
+            StatusCode::NOT_FOUND,
+            format!("未找到 {} 平台的二进制", platform),
+        )
+            .into_response()
     }
 }
 
 pub async fn host_info() -> Json<ApiResponse<HostInfo>> {
     let (platform, arch) = detect_host_platform();
     Json(ApiResponse::ok(HostInfo { platform, arch }))
+}
+
+// ── 服务注册与发现（Agent 间点对点通信） ─────────────────
+
+/// 查询服务列表（按能力/类型/健康/区域过滤）
+pub async fn list_services(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ServiceQueryParams>,
+) -> ApiResult<ServiceQueryResponse> {
+    let agents = state
+        .service_registry
+        .query(
+            q.capability.as_deref(),
+            q.agent_type.as_deref(),
+            q.health.as_deref(),
+            q.region.as_deref(),
+        )
+        .await;
+    let total = agents.len();
+    Ok(Json(ApiResponse::ok(ServiceQueryResponse {
+        agents,
+        total,
+    })))
+}
+
+/// 获取单个服务详情
+pub async fn get_service(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<ServiceAgentInfo> {
+    match state.service_registry.get(id).await {
+        Some(info) => Ok(Json(ApiResponse::ok(info))),
+        None => Err(AppError(anyhow::anyhow!("服务不存在"))),
+    }
+}
+
+/// 服务注册（HTTP 方式，供不使用 WebSocket 的客户端使用）
+pub async fn register_service(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AgentRegisterReqV2>,
+) -> ApiResult<AgentRegisterResp> {
+    let node_id = req.node_id.unwrap_or_else(Uuid::new_v4);
+    let now = Utc::now();
+
+    // 注册到节点表
+    state
+        .with_transaction(|conn| {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM nodes WHERE id = ?1",
+                    params![node_id.to_string()],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if exists {
+                conn.execute(
+                    "UPDATE nodes SET hostname=?1, platform=?2, arch=?3, version=?4, status='online', last_seen=?5 WHERE id=?6",
+                    params![req.hostname, req.platform, req.arch, req.version, now.to_rfc3339(), node_id.to_string()],
+                )?;
+            } else {
+                conn.execute(
+                    "INSERT INTO nodes VALUES (?1,?2,?3,?4,?5,'online',?6,?6,'[]',0,0,NULL)",
+                    params![node_id.to_string(), req.hostname, req.platform, req.arch, req.version, now.to_rfc3339()],
+                )?;
+            }
+            Ok(())
+        })
+        .await?;
+
+    // 如果提供了 serve 地址，注册到服务注册中心
+    if let (Some(host), Some(port)) = (req.serve_host, req.serve_port) {
+        let agent_type = req.agent_type.unwrap_or_else(|| "unknown".to_string());
+        let info = ServiceAgentInfo {
+            agent_id: node_id,
+            name: req.hostname.clone(),
+            agent_type,
+            host,
+            port,
+            capabilities: req.capability_tags.clone(),
+            health: "healthy".to_string(),
+            load: 0.0,
+            region: req.region.clone(),
+            version: req.version.clone(),
+            last_heartbeat: Some(now.to_rfc3339()),
+        };
+        let event = state.service_registry.register(info).await;
+        // 广播服务变更
+        ws::notify_service_changed(&state, &event).await;
+    }
+
+    Ok(Json(ApiResponse::ok(AgentRegisterResp {
+        node_id,
+        poll_interval_secs: state.cfg.heartbeat_timeout_secs,
+        master_listen: state.cfg.listen.clone(),
+    })))
 }
 
 // ── 路由 ──────────────────────────────────────────────────
@@ -720,15 +858,30 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         // 下发记录
         .route("/api/v1/dispatches", get(list_dispatches))
         // 工作流
-        .route("/api/v1/workflows", get(list_workflows).post(create_workflow))
-        .route("/api/v1/workflows/{id}", get(get_workflow).put(update_workflow).delete(delete_workflow))
-        .route("/api/v1/workflows/{id}/trigger", post(trigger_workflow_handler))
+        .route(
+            "/api/v1/workflows",
+            get(list_workflows).post(create_workflow),
+        )
+        .route(
+            "/api/v1/workflows/{id}",
+            get(get_workflow)
+                .put(update_workflow)
+                .delete(delete_workflow),
+        )
+        .route(
+            "/api/v1/workflows/{id}/trigger",
+            post(trigger_workflow_handler),
+        )
         .route("/api/v1/workflow-runs", get(list_workflow_runs))
         // Agent
         .route("/api/v1/agent/heartbeat", post(agent_heartbeat))
         .route("/api/v1/agent/config", post(agent_fetch_config))
         .route("/api/v1/agent/report", post(agent_report))
         .route("/api/v1/agent/claim", post(agent_claim))
+        .route("/api/v1/agent/register", post(register_service))
+        // 服务注册与发现
+        .route("/api/v1/agents", get(list_services))
+        .route("/api/v1/agents/{id}", get(get_service))
         // WebSocket
         .route("/ws", get(ws::ws_handler))
         // 二进制分发

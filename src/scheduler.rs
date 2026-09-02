@@ -69,7 +69,11 @@ pub fn execute_workflow(conn: &Connection, wf: &Workflow) -> Result<WorkflowRun>
         workflow_id: wf.id,
         workflow_name: wf.name.clone(),
         triggered_at: now,
-        status: if task_count > 0 { "running".into() } else { "failed".into() },
+        status: if task_count > 0 {
+            "running".into()
+        } else {
+            "failed".into()
+        },
         task_count,
         success_count: 0,
         failed_count: 0,
@@ -307,7 +311,11 @@ pub fn apply_report(conn: &Connection, req: &AgentReportReq) -> Result<RunRecord
     let now_str = now.to_rfc3339();
 
     if let Some(did) = req.dispatch_id {
-        let state = if req.status == "failed" { "failed" } else { "success" };
+        let state = if req.status == "failed" {
+            "failed"
+        } else {
+            "success"
+        };
         conn.execute(
             "UPDATE dispatches SET state = ?1, updated_at = ?2 WHERE id = ?3",
             params![state, now_str, did.to_string()],
@@ -340,7 +348,8 @@ pub fn apply_report(conn: &Connection, req: &AgentReportReq) -> Result<RunRecord
                     |r| r.get(0),
                 )
                 .unwrap_or_default();
-            let dispatch_ids: Vec<Uuid> = serde_json::from_str(&dispatch_ids_str).unwrap_or_default();
+            let dispatch_ids: Vec<Uuid> =
+                serde_json::from_str(&dispatch_ids_str).unwrap_or_default();
             if !dispatch_ids.contains(&did) {
                 continue;
             }
@@ -440,28 +449,48 @@ pub fn cancel_task(conn: &Connection, task_id: Uuid) -> Result<()> {
 
 pub fn overview(conn: &Connection) -> Result<Overview> {
     let nodes_total: i64 = conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?;
-    let nodes_online: i64 = conn
-        .query_row("SELECT COUNT(*) FROM nodes WHERE status != 'offline'", [], |r| r.get(0))?;
+    let nodes_online: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM nodes WHERE status != 'offline'",
+        [],
+        |r| r.get(0),
+    )?;
     let tasks_total: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
-    let tasks_running: i64 = conn
-        .query_row("SELECT COUNT(*) FROM dispatches WHERE state IN ('running', 'acked')", [], |r| r.get(0))?;
-    let workflows_total: i64 = conn.query_row("SELECT COUNT(*) FROM workflows", [], |r| r.get(0))?;
-    let workflows_active: i64 = conn
-        .query_row("SELECT COUNT(*) FROM workflows WHERE enable = 1", [], |r| r.get(0))?;
-    let dispatches_pending: i64 = conn
-        .query_row("SELECT COUNT(*) FROM dispatches WHERE state = 'pending' AND node_id IS NULL", [], |r| r.get(0))?;
-    let bytes_downloaded: i64 = conn
-        .query_row("SELECT COALESCE(SUM(downloaded_bytes), 0) FROM runs", [], |r| r.get(0))?;
-    let runs_success: i64 = conn
-        .query_row("SELECT COUNT(*) FROM runs WHERE status IN ('success', 'skipped')", [], |r| r.get(0))?;
-    let runs_failed: i64 = conn
-        .query_row("SELECT COUNT(*) FROM runs WHERE status = 'failed'", [], |r| r.get(0))?;
-    let (speed_sum, speed_n): (f64, i64) = conn
-        .query_row(
-            "SELECT COALESCE(SUM(avg_speed_mbps), 0), COUNT(*) FROM runs WHERE avg_speed_mbps > 0",
-            [],
-            |r| Ok((r.get::<_, f64>(0)?, r.get::<_, i64>(1)?)),
-        )?;
+    let tasks_running: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM dispatches WHERE state IN ('running', 'acked')",
+        [],
+        |r| r.get(0),
+    )?;
+    let workflows_total: i64 =
+        conn.query_row("SELECT COUNT(*) FROM workflows", [], |r| r.get(0))?;
+    let workflows_active: i64 =
+        conn.query_row("SELECT COUNT(*) FROM workflows WHERE enable = 1", [], |r| {
+            r.get(0)
+        })?;
+    let dispatches_pending: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM dispatches WHERE state = 'pending' AND node_id IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let bytes_downloaded: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(downloaded_bytes), 0) FROM runs",
+        [],
+        |r| r.get(0),
+    )?;
+    let runs_success: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM runs WHERE status IN ('success', 'skipped')",
+        [],
+        |r| r.get(0),
+    )?;
+    let runs_failed: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM runs WHERE status = 'failed'",
+        [],
+        |r| r.get(0),
+    )?;
+    let (speed_sum, speed_n): (f64, i64) = conn.query_row(
+        "SELECT COALESCE(SUM(avg_speed_mbps), 0), COUNT(*) FROM runs WHERE avg_speed_mbps > 0",
+        [],
+        |r| Ok((r.get::<_, f64>(0)?, r.get::<_, i64>(1)?)),
+    )?;
 
     Ok(Overview {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -476,6 +505,10 @@ pub fn overview(conn: &Connection) -> Result<Overview> {
         bytes_downloaded: bytes_downloaded as u64,
         runs_success: runs_success as usize,
         runs_failed: runs_failed as usize,
-        avg_speed_mbps: if speed_n > 0 { speed_sum / speed_n as f64 } else { 0.0 },
+        avg_speed_mbps: if speed_n > 0 {
+            speed_sum / speed_n as f64
+        } else {
+            0.0
+        },
     })
 }

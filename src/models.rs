@@ -385,3 +385,123 @@ pub struct Overview {
     pub runs_failed: usize,
     pub avg_speed_mbps: f64,
 }
+
+// ─── 服务注册与发现（Agent 间点对点通信）───
+
+/// 已注册服务的 Agent 信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAgentInfo {
+    /// Agent 唯一 ID
+    pub agent_id: Uuid,
+    /// 节点名称
+    pub name: String,
+    /// Agent 类型（如 spde / pdc / pcdn-keeper）
+    pub agent_type: String,
+    /// serve 模式监听地址
+    pub host: String,
+    /// serve 模式监听端口
+    pub port: u16,
+    /// 能力标识列表
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// 健康状态（healthy / unhealthy / unknown）
+    #[serde(default = "default_health")]
+    pub health: String,
+    /// 当前负载（0.0 - 1.0）
+    #[serde(default)]
+    pub load: f32,
+    /// 区域/机房标识
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// 组件版本号
+    pub version: String,
+    /// 最后心跳时间（RFC3339）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat: Option<String>,
+}
+
+fn default_health() -> String {
+    "unknown".to_string()
+}
+
+impl ServiceAgentInfo {
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|c| c == capability)
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.health == "healthy"
+    }
+
+    pub fn base_url(&self) -> String {
+        format!("http://{}:{}", self.host, self.port)
+    }
+}
+
+/// 服务查询响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceQueryResponse {
+    pub agents: Vec<ServiceAgentInfo>,
+    pub total: usize,
+}
+
+/// 服务变更事件（WebSocket 推送）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChangedEvent {
+    pub agent_id: Uuid,
+    /// 变更类型（up / down / updated）
+    pub change_type: String,
+    pub agent_type: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub health: String,
+    #[serde(default)]
+    pub load: f32,
+}
+
+/// 服务查询过滤参数
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServiceQueryParams {
+    #[serde(default)]
+    pub capability: Option<String>,
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    #[serde(default)]
+    pub health: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+}
+
+/// 扩展的 Agent 注册请求（支持 serve 模式地址与能力上报）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRegisterReqV2 {
+    pub node_id: Option<Uuid>,
+    pub hostname: String,
+    pub platform: String,
+    pub arch: String,
+    pub version: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Agent 类型（如 spde / pdc），用于服务注册中心分类
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    /// serve 模式监听地址（用于 Agent 间点对点通信）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serve_host: Option<String>,
+    /// serve 模式监听端口
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serve_port: Option<u16>,
+    /// 区域/机房标识
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// 能力标识列表（用于服务注册中心）
+    #[serde(default)]
+    pub capability_tags: Vec<String>,
+}

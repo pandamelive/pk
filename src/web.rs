@@ -14,17 +14,11 @@ pub fn mount(app: Router) -> Router {
 }
 
 async fn index() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        INDEX,
-    )
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], INDEX)
 }
 
 async fn css() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        CSS,
-    )
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], CSS)
 }
 
 async fn js() -> impl IntoResponse {

@@ -49,7 +49,8 @@ async fn scan_and_trigger(state: &Arc<AppState>) -> Result<()> {
     let now = Utc::now();
     let to_trigger: Vec<Uuid> = state
         .with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT id, next_run_at FROM workflows WHERE enable = 1")?;
+            let mut stmt =
+                conn.prepare("SELECT id, next_run_at FROM workflows WHERE enable = 1")?;
             let ids: Vec<Uuid> = stmt
                 .query_map([], |r| {
                     let id_str: String = r.get(0)?;
@@ -187,12 +188,7 @@ fn next_daily(now: DateTime<Utc>, hour: u32, minute: u32) -> Option<DateTime<Utc
     }
 }
 
-fn next_weekly(
-    now: DateTime<Utc>,
-    weekday: u8,
-    hour: u32,
-    minute: u32,
-) -> Option<DateTime<Utc>> {
+fn next_weekly(now: DateTime<Utc>, weekday: u8, hour: u32, minute: u32) -> Option<DateTime<Utc>> {
     // chrono: weekday() 返回 0=Mon ... 6=Sun
     // 我们约定 0=Sun ... 6=Sat，需要转换
     let target_chrono = if weekday == 0 { 6 } else { weekday - 1 };

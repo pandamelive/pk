@@ -20,8 +20,30 @@ use uuid::Uuid;
 pub enum ServerMsg {
     ConfigChanged,
     NewTask,
-    HeartbeatAck { timestamp: String },
-    Error { message: String },
+    HeartbeatAck {
+        timestamp: String,
+    },
+    Error {
+        message: String,
+    },
+    /// 服务变更通知（服务注册中心推送，Agent 收到后更新本地服务缓存）
+    ServiceChanged {
+        agent_id: Uuid,
+        change_type: String,
+        agent_type: String,
+        #[serde(default)]
+        capabilities: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
+        #[serde(default)]
+        health: String,
+        #[serde(default)]
+        load: f32,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -33,6 +55,21 @@ pub enum ClientMsg {
         platform: String,
         arch: String,
         version: String,
+        /// Agent 类型（如 spde / pdc，用于服务注册中心分类，可选）
+        #[serde(default)]
+        agent_type: Option<String>,
+        /// serve 模式监听地址（用于 Agent 间点对点通信，可选）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        serve_host: Option<String>,
+        /// serve 模式监听端口（可选）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        serve_port: Option<u16>,
+        /// 区域/机房标识（可选）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
+        /// 能力标识列表（用于服务注册中心，可选）
+        #[serde(default)]
+        capability_tags: Vec<String>,
     },
     Heartbeat {
         node_id: Uuid,
@@ -93,15 +130,31 @@ impl WsManager {
 
 /// 通知所有节点：配置已变更（节点应重新拉取 config）
 pub async fn notify_config_changed(state: &Arc<AppState>) {
-    state
-        .ws_mgr
-        .broadcast(&ServerMsg::ConfigChanged)
-        .await;
+    state.ws_mgr.broadcast(&ServerMsg::ConfigChanged).await;
 }
 
 /// 通知所有节点：共享待下发池有新任务（空闲节点去 claim 领取）
 pub async fn notify_new_task(state: &Arc<AppState>) {
     state.ws_mgr.broadcast(&ServerMsg::NewTask).await;
+}
+
+/// 通知所有节点：服务注册中心有变更（Agent 上下线/能力更新）
+pub async fn notify_service_changed(
+    state: &Arc<AppState>,
+    event: &crate::models::ServiceChangedEvent,
+) {
+    let msg = ServerMsg::ServiceChanged {
+        agent_id: event.agent_id,
+        change_type: event.change_type.clone(),
+        agent_type: event.agent_type.clone(),
+        capabilities: event.capabilities.clone(),
+        host: event.host.clone(),
+        port: event.port,
+        region: event.region.clone(),
+        health: event.health.clone(),
+        load: event.load,
+    };
+    state.ws_mgr.broadcast(&msg).await;
 }
 
 // ── WebSocket 处理 ────────────────────────────────────────
@@ -159,6 +212,11 @@ async fn handle_client_msg(state: &Arc<AppState>, conn_id: Uuid, text: &str) -> 
             platform,
             arch,
             version,
+            agent_type,
+            serve_host,
+            serve_port,
+            region,
+            capability_tags,
         } => {
             state.ws_mgr.bind_node(conn_id, node_id).await;
             let now = Utc::now();
@@ -186,6 +244,27 @@ async fn handle_client_msg(state: &Arc<AppState>, conn_id: Uuid, text: &str) -> 
                     Ok(())
                 })
                 .await?;
+
+            // 如果提供了 serve 地址，注册到服务注册中心并广播
+            if let (Some(host), Some(port)) = (serve_host, serve_port) {
+                let at = agent_type.unwrap_or_else(|| "unknown".to_string());
+                let info = crate::models::ServiceAgentInfo {
+                    agent_id: node_id,
+                    name: hostname.clone(),
+                    agent_type: at,
+                    host,
+                    port,
+                    capabilities: capability_tags,
+                    health: "healthy".to_string(),
+                    load: 0.0,
+                    region,
+                    version: version.clone(),
+                    last_heartbeat: Some(now.to_rfc3339()),
+                };
+                let event = state.service_registry.register(info).await;
+                notify_service_changed(state, &event).await;
+            }
+
             tracing::info!("[ws] 节点注册 node_id={} hostname={}", node_id, hostname);
         }
         ClientMsg::Heartbeat {
@@ -203,6 +282,16 @@ async fn handle_client_msg(state: &Arc<AppState>, conn_id: Uuid, text: &str) -> 
                     Ok(())
                 })
                 .await?;
+            // 同步更新服务注册中心健康状态
+            let load = if active_tasks > 0 {
+                (active_tasks as f32 / 4.0).min(1.0)
+            } else {
+                0.0
+            };
+            state
+                .service_registry
+                .update_health(node_id, "healthy", load)
+                .await;
         }
         ClientMsg::Pong => {}
     }
@@ -228,19 +317,39 @@ pub fn build_node_task_config(state: &AppState, node_task: &scheduler::NodeTask)
         http_proxy: defaults.http_proxy.clone(),
         https_proxy: defaults.https_proxy.clone(),
     };
-    if let Some(o) = &t.overrides {
-        if let Some(v) = o.max_concurrent { item.max_concurrent = v; }
-        if let Some(v) = o.connections_per_file { item.connections_per_file = v; }
-        if let Some(v) = o.retry_times { item.retry_times = v; }
-        if let Some(v) = o.timeout { item.timeout = v; }
-        if let Some(v) = o.skip_tls_verify { item.skip_tls_verify = v; }
-        if let Some(v) = o.dry_run { item.dry_run = v; }
-        if let Some(v) = o.save_path.clone() { item.save_path = v; }
+    let o = &t.overrides;
+    if let Some(v) = o.max_concurrent {
+        item.max_concurrent = v;
+    }
+    if let Some(v) = o.connections_per_file {
+        item.connections_per_file = v;
+    }
+    if let Some(v) = o.retry_times {
+        item.retry_times = v;
+    }
+    if let Some(v) = o.timeout {
+        item.timeout = v;
+    }
+    if let Some(v) = o.skip_tls_verify {
+        item.skip_tls_verify = v;
+    }
+    if let Some(v) = o.dry_run {
+        item.dry_run = v;
+    }
+    if let Some(v) = o.save_path.clone() {
+        item.save_path = v;
     }
     NodeConfig {
         dispatch_id: node_task.dispatch_id,
-        master: format!("http://127.0.0.1:{}", state.cfg.listen.split(':').last().unwrap_or("5566")),
-        token: if state.cfg.token.is_empty() { None } else { Some(state.cfg.token.clone()) },
+        master: format!(
+            "http://127.0.0.1:{}",
+            state.cfg.listen.split(':').last().unwrap_or("5566")
+        ),
+        token: if state.cfg.token.is_empty() {
+            None
+        } else {
+            Some(state.cfg.token.clone())
+        },
         tasks: vec![item],
     }
 }

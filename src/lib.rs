@@ -2,6 +2,7 @@ pub mod api;
 pub mod config;
 pub mod models;
 pub mod scheduler;
+pub mod service_registry;
 pub mod spde_cfg;
 pub mod store;
 pub mod web;
