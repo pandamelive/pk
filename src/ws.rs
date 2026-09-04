@@ -414,6 +414,20 @@ async fn handle_client_msg(
             );
         }
 
+        // ── PDC 发现事件（pandanetos 协议扩展，pk 当前不消费，仅记录） ──
+        ClientMsg::DiscoveryStarted(ds) => {
+            tracing::debug!(
+                "[ws] PDC discovery started: task_id={} infohash={}",
+                ds.task_id, ds.infohash
+            );
+        }
+        ClientMsg::DiscoveryResult(dr) => {
+            tracing::debug!(
+                "[ws] PDC discovery result: task_id={} infohash={} peers={} success={}",
+                dr.task_id, dr.infohash, dr.peers_count, dr.success
+            );
+        }
+
         // ── 旧协议兼容：心跳 ──
         ClientMsg::Heartbeat {
             node_id,
