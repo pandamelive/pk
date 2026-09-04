@@ -418,13 +418,17 @@ async fn handle_client_msg(
         ClientMsg::DiscoveryStarted(ds) => {
             tracing::debug!(
                 "[ws] PDC discovery started: task_id={} infohash={}",
-                ds.task_id, ds.infohash
+                ds.task_id,
+                ds.infohash,
             );
         }
         ClientMsg::DiscoveryResult(dr) => {
             tracing::debug!(
                 "[ws] PDC discovery result: task_id={} infohash={} peers={} success={}",
-                dr.task_id, dr.infohash, dr.peers_count, dr.success
+                dr.task_id,
+                dr.infohash,
+                dr.peers_count,
+                dr.success,
             );
         }
 
