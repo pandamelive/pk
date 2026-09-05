@@ -1,5 +1,6 @@
 use crate::config::PkConfig;
 use crate::models::*;
+use crate::torrent_index::TorrentIndexDb;
 use crate::service_registry::ServiceRegistry;
 use crate::ws::WsManager;
 use anyhow::{Context, Result};
@@ -17,6 +18,7 @@ pub struct AppState {
     pub ws_mgr: WsManager,
     pub service_registry: ServiceRegistry,
     pub conn: Mutex<Connection>,
+    pub torrent_index: Arc<TorrentIndexDb>,
 }
 
 impl AppState {
@@ -51,6 +53,11 @@ impl AppState {
             std::fs::rename(&json_path, &bak).ok();
         }
 
+        let torrent_index = Arc::new(
+            TorrentIndexDb::open(data_dir.join("torrent_index.db"))
+                .context("open torrent_index db")?,
+        );
+
         Ok(Arc::new(Self {
             cfg,
             work_root,
@@ -59,6 +66,7 @@ impl AppState {
             ws_mgr: WsManager::new(),
             service_registry: ServiceRegistry::new(),
             conn: Mutex::new(conn),
+            torrent_index,
         }))
     }
 

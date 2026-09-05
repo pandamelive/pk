@@ -6,15 +6,21 @@ use axum::Router;
 const INDEX: &str = include_str!("../web/index.html");
 const CSS: &str = include_str!("../web/style.css");
 const JS: &str = include_str!("../web/app.js");
+const TORRENTS: &str = include_str!("../web/torrents.html");
 
 pub fn mount(app: Router) -> Router {
     app.route("/", get(index))
+        .route("/torrents", get(torrents))
         .route("/assets/style.css", get(css))
         .route("/assets/app.js", get(js))
 }
 
 async fn index() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], INDEX)
+}
+
+async fn torrents() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], TORRENTS)
 }
 
 async fn css() -> impl IntoResponse {

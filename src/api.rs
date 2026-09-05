@@ -1,4 +1,5 @@
 use crate::config::{PkConfig, SpdeDefaults};
+use crate::torrent_index::TorrentIndex;
 use crate::models::*;
 use crate::scheduler;
 use crate::store::{artifact_filename, detect_host_platform, AppState};
@@ -882,6 +883,15 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         // 服务注册与发现
         .route("/api/v1/agents", get(list_services))
         .route("/api/v1/agents/{id}", get(get_service))
+        // 监控
+        .route("/api/v1/metrics", get(pk_metrics))
+        // 种子索引
+        .route("/api/v1/torrents", get(list_torrents).post(upsert_torrent))
+        .route("/api/v1/torrents/top", get(top_torrents))
+        .route("/api/v1/torrents/recent", get(recent_torrents))
+        .route("/api/v1/torrents/stats", get(torrent_stats))
+        .route("/api/v1/torrents/{infohash}", get(get_torrent).delete(delete_torrent))
+        .route("/api/v1/torrents/{infohash}/files", get(torrent_files))
         // WebSocket
         .route("/ws", get(ws::ws_handler))
         // 二进制分发
@@ -890,4 +900,138 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/", get(serve_web_root))
         .route("/{path}", get(serve_web))
         .with_state(state)
+}
+
+// ─── 种子索引 API ───
+
+
+#[derive(Debug, Deserialize)]
+struct TorrentQuery {
+    q: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+async fn list_torrents(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TorrentQuery>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    let offset = query.offset.unwrap_or(0);
+
+    let result = if let Some(q) = &query.q {
+        state.torrent_index.search(q, limit, offset)
+    } else {
+        state.torrent_index.get_top(limit)
+    };
+
+    match result {
+        Ok(torrents) => Ok(axum::Json(torrents)),
+        Err(e) => {
+            tracing::error!("查询种子索引失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn get_torrent(
+    State(state): State<Arc<AppState>>,
+    Path(infohash): Path<String>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.get(&infohash) {
+        Ok(Some(torrent)) => Ok(axum::Json(torrent)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("获取种子详情失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn torrent_files(
+    State(state): State<Arc<AppState>>,
+    Path(infohash): Path<String>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.get_files(&infohash) {
+        Ok(files) => Ok(axum::Json(files)),
+        Err(e) => {
+            tracing::error!("获取种子文件列表失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn top_torrents(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.get_top(20) {
+        Ok(torrents) => Ok(axum::Json(torrents)),
+        Err(e) => {
+            tracing::error!("获取热门种子失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn recent_torrents(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.get_recent(20) {
+        Ok(torrents) => Ok(axum::Json(torrents)),
+        Err(e) => {
+            tracing::error!("获取最新种子失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn torrent_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.stats() {
+        Ok(stats) => Ok(axum::Json(stats)),
+        Err(e) => {
+            tracing::error!("获取索引统计失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn upsert_torrent(
+    State(state): State<Arc<AppState>>,
+    axum::Json(torrent): axum::Json<TorrentIndex>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.upsert(&torrent) {
+        Ok(_) => Ok(axum::Json(serde_json::json!({"status": "ok"}))),
+        Err(e) => {
+            tracing::error!("插入种子索引失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn delete_torrent(
+    State(state): State<Arc<AppState>>,
+    Path(infohash): Path<String>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.delete(&infohash) {
+        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => {
+            tracing::error!("删除种子失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+// ─── 监控 API ───
+
+use crate::metrics::PkStats;
+
+async fn pk_metrics() -> impl axum::response::IntoResponse {
+    let stats = PkStats::global();
+    stats.record_api_request();
+    axum::response::Response::builder()
+        .header("Content-Type", "text/plain; version=0.0.4")
+        .body(stats.to_prometheus())
+        .unwrap_or_else(|_| axum::response::Response::new(String::new()))
 }
