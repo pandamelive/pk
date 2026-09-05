@@ -1,0 +1,27 @@
+services:
+  rust-runner:
+    build: .
+    container_name: github-rust-runner
+    restart: unless-stopped
+    environment:
+      - REPO_URL=${REPO_URL}
+      - RUNNER_TOKEN=${RUNNER_TOKEN}
+      - RUNNER_NAME=${RUNNER_NAME:-docker-rust-runner}
+      - RUNNER_LABELS=${RUNNER_LABELS:-docker,rust,self-hosted,linux,x64}
+    volumes:
+      # 编译缓存持久化
+      - cargo-registry:/opt/cargo/registry
+      - cargo-git:/opt/cargo/git
+      - sccache:/opt/cargo/sccache
+      # Docker-in-Docker（cross 需要）
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  sccache:

@@ -3,6 +3,7 @@ use crate::models::*;
 use crate::scheduler;
 use crate::spde_cfg;
 use crate::store::{artifact_filename, detect_host_platform, AppState};
+use crate::torrent_index::TorrentIndex;
 use crate::workflow_scheduler;
 use crate::ws;
 use anyhow::Result;
@@ -14,6 +15,7 @@ use chrono::Utc;
 use pandanetos::protocol::paths;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -1108,6 +1110,36 @@ pub async fn list_dispatches(State(state): State<Arc<AppState>>) -> ApiResult<Ve
 
 // ── 二进制分发 ─────────────────────────────────
 
+pub async fn serve_web(State(_state): State<Arc<AppState>>, Path(path): Path<String>) -> Response {
+    let safe_path = if path.is_empty() {
+        "index.html".into()
+    } else {
+        path
+    };
+    let web_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("web");
+    let file_path = web_dir.join(&safe_path);
+    if file_path.exists() && file_path.is_file() {
+        let content = tokio::fs::read(&file_path).await.unwrap_or_default();
+        let mime = match file_path.extension().and_then(|e| e.to_str()) {
+            Some("html") => "text/html; charset=utf-8",
+            Some("js") => "application/javascript; charset=utf-8",
+            Some("css") => "text/css; charset=utf-8",
+            Some("json") => "application/json",
+            Some("svg") => "image/svg+xml",
+            Some("png") => "image/png",
+            Some("ico") => "image/x-icon",
+            _ => "application/octet-stream",
+        };
+        ([("content-type", mime)], content).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "Not Found").into_response()
+    }
+}
+
 #[derive(Serialize)]
 pub struct ArtifactInfo {
     pub platform: String,
@@ -1184,6 +1216,106 @@ pub async fn host_info() -> Json<ApiResponse<HostInfo>> {
     Json(ApiResponse::ok(HostInfo { platform, arch }))
 }
 
+// ── 服务注册与发现（Agent 间点对点通信） ─────────────────
+
+/// 查询服务列表（按能力/类型/健康/区域过滤）
+pub async fn list_services(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ServiceQueryParams>,
+) -> ApiResult<ServiceQueryResponse> {
+    let agents = state
+        .service_registry
+        .query(
+            q.capability.as_deref(),
+            q.agent_type.as_deref(),
+            q.health.as_deref(),
+            q.region.as_deref(),
+        )
+        .await;
+    let total = agents.len();
+    Ok(Json(ApiResponse::ok(ServiceQueryResponse {
+        agents,
+        total,
+    })))
+}
+
+/// 获取单个服务详情
+pub async fn get_service(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<ServiceAgentInfo> {
+    match state.service_registry.get(id).await {
+        Some(info) => Ok(Json(ApiResponse::ok(info))),
+        None => Err(AppError(ApiErrorResp::new(
+            pandanetos::error::codes::NOT_FOUND,
+            "服务不存在".to_string(),
+        ))),
+    }
+}
+
+/// 服务注册（HTTP 方式，供不使用 WebSocket 的客户端使用）
+pub async fn register_service(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AgentRegisterReqV2>,
+) -> ApiResult<AgentRegisterResp> {
+    let node_id = req.node_id.unwrap_or_else(Uuid::new_v4);
+    let now = Utc::now();
+
+    // 注册到节点表
+    state
+        .with_transaction(|conn| {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM nodes WHERE id = ?1",
+                    params![node_id.to_string()],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if exists {
+                conn.execute(
+                    "UPDATE nodes SET hostname=?1, platform=?2, arch=?3, version=?4, status='online', last_seen=?5 WHERE id=?6",
+                    params![req.hostname, req.platform, req.arch, req.version, now.to_rfc3339(), node_id.to_string()],
+                )?;
+            } else {
+                conn.execute(
+                    "INSERT INTO nodes VALUES (?1,?2,?3,?4,?5,'online',?6,?6,'[]',0,0,NULL)",
+                    params![node_id.to_string(), req.hostname, req.platform, req.arch, req.version, now.to_rfc3339()],
+                )?;
+            }
+            Ok(())
+        })
+        .await?;
+
+    // 如果提供了 serve 地址，注册到服务注册中心
+    if let (Some(host), Some(port)) = (req.serve_host, req.serve_port) {
+        let agent_type = req.agent_type.unwrap_or_else(|| "unknown".to_string());
+        let info = ServiceAgentInfo {
+            agent_id: node_id,
+            name: req.hostname.clone(),
+            agent_type,
+            host,
+            port,
+            capabilities: req.capability_tags.clone(),
+            health: "healthy".to_string(),
+            load: 0.0,
+            region: req.region.clone(),
+            version: req.version.clone(),
+            last_heartbeat: Some(now.to_rfc3339()),
+        };
+        let event = state.service_registry.register(info).await;
+        // 广播服务变更
+        ws::notify_service_changed(&state, &event).await;
+    }
+
+    Ok(Json(ApiResponse::ok(AgentRegisterResp {
+        node_id,
+        poll_interval_secs: state.cfg.heartbeat_timeout_secs,
+        master_listen: state.cfg.listen.clone(),
+        status: "online".to_string(),
+    })))
+}
+
 // ── 路由 ──────────────────────────────────────────────────
 
 pub fn router(state: Arc<AppState>) -> axum::Router {
@@ -1233,6 +1365,22 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/v1/agent/config", post(agent_fetch_config))
         .route("/api/v1/agent/report", post(agent_report))
         .route(paths::DISPATCH_CLAIM, post(agent_claim))
+        // 服务注册与发现
+        .route(paths::AGENTS, get(list_services))
+        .route(paths::AGENT_DETAIL, get(get_service))
+        .route("/api/v1/services/register", post(register_service))
+        // 监控
+        .route("/api/v1/metrics", get(pk_metrics))
+        // 种子索引
+        .route("/api/v1/torrents", get(list_torrents).post(upsert_torrent))
+        .route("/api/v1/torrents/top", get(top_torrents))
+        .route("/api/v1/torrents/recent", get(recent_torrents))
+        .route("/api/v1/torrents/stats", get(torrent_stats))
+        .route(
+            "/api/v1/torrents/{infohash}",
+            get(get_torrent).delete(delete_torrent),
+        )
+        .route("/api/v1/torrents/{infohash}/files", get(torrent_files))
         // WebSocket
         .route("/api/v1/agent/ws", get(ws::ws_handler))
         .route("/api/v1/realtime/ws", get(ws::frontend_ws_handler))
@@ -1240,4 +1388,137 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/v1/artifacts", get(list_artifacts))
         .route("/api/v1/artifacts/{platform}", get(serve_artifact))
         .with_state(state)
+}
+
+// ─── 种子索引 API ───
+
+#[derive(Debug, Deserialize)]
+struct TorrentQuery {
+    q: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+async fn list_torrents(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TorrentQuery>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    let offset = query.offset.unwrap_or(0);
+
+    let result = if let Some(q) = &query.q {
+        state.torrent_index.search(q, limit, offset)
+    } else {
+        state.torrent_index.get_top(limit)
+    };
+
+    match result {
+        Ok(torrents) => Ok(axum::Json(torrents)),
+        Err(e) => {
+            tracing::error!("查询种子索引失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn get_torrent(
+    State(state): State<Arc<AppState>>,
+    Path(infohash): Path<String>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.get(&infohash) {
+        Ok(Some(torrent)) => Ok(axum::Json(torrent)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("获取种子详情失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn torrent_files(
+    State(state): State<Arc<AppState>>,
+    Path(infohash): Path<String>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.get_files(&infohash) {
+        Ok(files) => Ok(axum::Json(files)),
+        Err(e) => {
+            tracing::error!("获取种子文件列表失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn top_torrents(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.get_top(20) {
+        Ok(torrents) => Ok(axum::Json(torrents)),
+        Err(e) => {
+            tracing::error!("获取热门种子失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn recent_torrents(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.get_recent(20) {
+        Ok(torrents) => Ok(axum::Json(torrents)),
+        Err(e) => {
+            tracing::error!("获取最新种子失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn torrent_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.stats() {
+        Ok(stats) => Ok(axum::Json(stats)),
+        Err(e) => {
+            tracing::error!("获取索引统计失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn upsert_torrent(
+    State(state): State<Arc<AppState>>,
+    axum::Json(torrent): axum::Json<TorrentIndex>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.upsert(&torrent) {
+        Ok(_) => Ok(axum::Json(serde_json::json!({"status": "ok"}))),
+        Err(e) => {
+            tracing::error!("插入种子索引失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn delete_torrent(
+    State(state): State<Arc<AppState>>,
+    Path(infohash): Path<String>,
+) -> Result<impl axum::response::IntoResponse, StatusCode> {
+    match state.torrent_index.delete(&infohash) {
+        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => {
+            tracing::error!("删除种子失败: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+// ─── 监控 API ───
+
+use crate::metrics::PkStats;
+
+async fn pk_metrics() -> impl axum::response::IntoResponse {
+    let stats = PkStats::global();
+    stats.record_api_request();
+    axum::response::Response::builder()
+        .header("Content-Type", "text/plain; version=0.0.4")
+        .body(stats.to_prometheus())
+        .unwrap_or_else(|_| axum::response::Response::new(String::new()))
 }

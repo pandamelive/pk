@@ -7,6 +7,7 @@ use std::path::PathBuf;
 const INDEX: &str = include_str!("../web/index.html");
 const CSS: &str = include_str!("../web/style.css");
 const JS: &str = include_str!("../web/app.js");
+const TORRENTS: &str = include_str!("../web/torrents.html");
 const FAVICON: &[u8] = include_bytes!("../web/favicon.png");
 
 /// 开发模式：设置 PK_DEV_WEB=1 后从本地 web/ 目录实时读取，改完刷新浏览器即可
@@ -38,6 +39,7 @@ fn dev_read_bytes(filename: &str) -> Option<Vec<u8>> {
 
 pub fn mount(app: Router) -> Router {
     app.route("/", get(index))
+        .route("/torrents", get(torrents))
         .route("/favicon.ico", get(favicon))
         .route("/favicon.png", get(favicon))
         .route("/assets/style.css", get(css))
@@ -46,6 +48,11 @@ pub fn mount(app: Router) -> Router {
 
 async fn index() -> impl IntoResponse {
     let body = dev_read("index.html").unwrap_or_else(|| INDEX.to_string());
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body)
+}
+
+async fn torrents() -> impl IntoResponse {
+    let body = dev_read("torrents.html").unwrap_or_else(|| TORRENTS.to_string());
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body)
 }
 

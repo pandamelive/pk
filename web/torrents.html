@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>种子索引 - PandaKeeper</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1117; color: #e0e0e0; }
+        .header { background: #1a1d27; padding: 16px 24px; border-bottom: 1px solid #2a2d3a; display: flex; align-items: center; justify-content: space-between; }
+        .header h1 { font-size: 20px; color: #6cb6ff; }
+        .header .stats { display: flex; gap: 24px; font-size: 13px; }
+        .header .stat-item { display: flex; flex-direction: column; align-items: flex-end; }
+        .header .stat-value { font-size: 18px; font-weight: 600; color: #6cb6ff; }
+        .header .stat-label { color: #8b8fa3; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+        .search-bar { display: flex; gap: 12px; margin-bottom: 20px; }
+        .search-bar input { flex: 1; padding: 10px 16px; background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 8px; color: #e0e0e0; font-size: 14px; outline: none; }
+        .search-bar input:focus { border-color: #6cb6ff; }
+        .search-bar button { padding: 10px 24px; background: #6cb6ff; color: #0f1117; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
+        .search-bar button:hover { background: #8cc5ff; }
+        .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+        .tab { padding: 8px 16px; background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 6px; cursor: pointer; font-size: 13px; color: #8b8fa3; }
+        .tab.active { background: #6cb6ff; color: #0f1117; border-color: #6cb6ff; }
+        table { width: 100%; border-collapse: collapse; background: #1a1d27; border-radius: 8px; overflow: hidden; }
+        th { background: #22253a; padding: 12px 16px; text-align: left; font-size: 12px; color: #8b8fa3; text-transform: uppercase; letter-spacing: 0.5px; }
+        td { padding: 12px 16px; border-bottom: 1px solid #2a2d3a; font-size: 13px; }
+        tr:hover { background: #22253a; }
+        .name { font-weight: 500; color: #e0e0e0; }
+        .infohash { font-family: monospace; font-size: 11px; color: #6cb6ff; }
+        .size { color: #8b8fa3; }
+        .seeders { color: #4ade80; font-weight: 600; }
+        .leechers { color: #f87171; font-weight: 600; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+        .badge-complete { background: #166534; color: #4ade80; }
+        .badge-stub { background: #78350f; color: #fbbf24; }
+        .badge-private { background: #7f1d1d; color: #f87171; }
+        .empty { text-align: center; padding: 60px; color: #8b8fa3; }
+        .loading { text-align: center; padding: 40px; color: #6cb6ff; }
+        .pagination { display: flex; justify-content: center; gap: 8px; margin-top: 20px; }
+        .pagination button { padding: 8px 16px; background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 6px; color: #e0e0e0; cursor: pointer; }
+        .pagination button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .pagination button:hover:not(:disabled) { border-color: #6cb6ff; }
+        .detail-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 100; justify-content: center; align-items: center; }
+        .detail-modal.active { display: flex; }
+        .detail-content { background: #1a1d27; border-radius: 12px; padding: 24px; max-width: 800px; width: 90%; max-height: 80vh; overflow-y: auto; }
+        .detail-content h2 { margin-bottom: 16px; color: #6cb6ff; }
+        .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+        .detail-item { display: flex; flex-direction: column; }
+        .detail-label { font-size: 11px; color: #8b8fa3; text-transform: uppercase; }
+        .detail-value { font-size: 14px; color: #e0e0e0; margin-top: 4px; }
+        .close-btn { float: right; background: none; border: none; color: #8b8fa3; font-size: 24px; cursor: pointer; }
+        .close-btn:hover { color: #e0e0e0; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>种子索引库</h1>
+        <div class="stats" id="stats">
+            <div class="stat-item"><span class="stat-value" id="stat-total">-</span><span class="stat-label">总种子</span></div>
+            <div class="stat-item"><span class="stat-value" id="stat-meta">-</span><span class="stat-label">有元数据</span></div>
+            <div class="stat-item"><span class="stat-value" id="stat-seeders">-</span><span class="stat-label">总做种</span></div>
+            <div class="stat-item"><span class="stat-value" id="stat-size">-</span><span class="stat-label">总大小</span></div>
+        </div>
+    </div>
+    <div class="container">
+        <div class="search-bar">
+            <input type="text" id="search-input" placeholder="搜索种子名称、文件路径..." />
+            <button onclick="search()">搜索</button>
+        </div>
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('top', this)">热门</div>
+            <div class="tab" onclick="switchTab('recent', this)">最新</div>
+        </div>
+        <div id="results">
+            <div class="loading">加载中...</div>
+        </div>
+        <div class="pagination" id="pagination"></div>
+    </div>
+
+    <div class="detail-modal" id="detail-modal">
+        <div class="detail-content">
+            <button class="close-btn" onclick="closeDetail()">&times;</button>
+            <h2 id="detail-title">种子详情</h2>
+            <div class="detail-grid" id="detail-grid"></div>
+            <h3 style="margin-bottom:12px;color:#8b8fa3;">文件列表</h3>
+            <div id="detail-files"></div>
+        </div>
+    </div>
+
+    <script>
+        let currentTab = 'top';
+        let currentPage = 0;
+        const pageSize = 50;
+
+        async function loadStats() {
+            try {
+                const res = await fetch('/api/v1/torrents/stats');
+                const stats = await res.json();
+                document.getElementById('stat-total').textContent = stats.total_torrents.toLocaleString();
+                document.getElementById('stat-meta').textContent = stats.with_metadata.toLocaleString();
+                document.getElementById('stat-seeders').textContent = stats.total_seeders.toLocaleString();
+                document.getElementById('stat-size').textContent = formatSize(stats.total_size);
+            } catch(e) { console.error(e); }
+        }
+
+        async function loadTorrents() {
+            const results = document.getElementById('results');
+            results.innerHTML = '<div class="loading">加载中...</div>';
+
+            let url;
+            if (currentTab === 'top') {
+                url = '/api/v1/torrents/top';
+            } else if (currentTab === 'recent') {
+                url = '/api/v1/torrents/recent';
+            } else {
+                const q = document.getElementById('search-input').value;
+                url = `/api/v1/torrents?q=${encodeURIComponent(q)}&limit=${pageSize}&offset=${currentPage * pageSize}`;
+            }
+
+            try {
+                const res = await fetch(url);
+                const torrents = await res.json();
+                renderTorrents(torrents);
+            } catch(e) {
+                results.innerHTML = '<div class="empty">加载失败</div>';
+            }
+        }
+
+        function renderTorrents(torrents) {
+            const results = document.getElementById('results');
+            if (!torrents || torrents.length === 0) {
+                results.innerHTML = '<div class="empty">没有找到种子</div>';
+                return;
+            }
+
+            let html = '<table><thead><tr><th>名称</th><th>大小</th><th>做种</th><th>下载</th><th>文件</th><th>状态</th><th>来源</th></tr></thead><tbody>';
+            for (const t of torrents) {
+                const statusBadge = t.metadata_complete
+                    ? '<span class="badge badge-complete">完整</span>'
+                    : '<span class="badge badge-stub">待下载</span>';
+                const privateBadge = t.private ? '<span class="badge badge-private">私有</span>' : '';
+                html += `<tr onclick="showDetail('${t.infohash}')" style="cursor:pointer">
+                    <td><div class="name">${escapeHtml(t.name || '(未知)')}</div><div class="infohash">${t.infohash.substring(0,16)}...</div></td>
+                    <td class="size">${formatSize(t.total_length)}</td>
+                    <td class="seeders">${t.seeders}</td>
+                    <td class="leechers">${t.leechers}</td>
+                    <td>${t.file_count}</td>
+                    <td>${statusBadge}${privateBadge}</td>
+                    <td>${t.source}</td>
+                </tr>`;
+            }
+            html += '</tbody></table>';
+            results.innerHTML = html;
+        }
+
+        async function showDetail(infohash) {
+            try {
+                const res = await fetch(`/api/v1/torrents/${infohash}`);
+                const t = await res.json();
+                document.getElementById('detail-title').textContent = t.name || '(未知)';
+                document.getElementById('detail-grid').innerHTML = `
+                    <div class="detail-item"><span class="detail-label">Infohash</span><span class="detail-value" style="font-family:monospace;font-size:12px;">${t.infohash}</span></div>
+                    <div class="detail-item"><span class="detail-label">总大小</span><span class="detail-value">${formatSize(t.total_length)}</span></div>
+                    <div class="detail-item"><span class="detail-label">分片大小</span><span class="detail-value">${formatSize(t.piece_length)}</span></div>
+                    <div class="detail-item"><span class="detail-label">分片数</span><span class="detail-value">${t.piece_count}</span></div>
+                    <div class="detail-item"><span class="detail-label">文件数</span><span class="detail-value">${t.file_count}</span></div>
+                    <div class="detail-item"><span class="detail-label">做种/下载</span><span class="detail-value"><span class="seeders">${t.seeders}</span> / <span class="leechers">${t.leechers}</span></span></div>
+                    <div class="detail-item"><span class="detail-label">完成次数</span><span class="detail-value">${t.completed}</span></div>
+                    <div class="detail-item"><span class="detail-label">来源</span><span class="detail-value">${t.source}</span></div>
+                    <div class="detail-item"><span class="detail-label">首次发现</span><span class="detail-value">${new Date(t.first_seen * 1000).toLocaleString()}</span></div>
+                    <div class="detail-item"><span class="detail-label">最后更新</span><span class="detail-value">${new Date(t.last_updated * 1000).toLocaleString()}</span></div>
+                `;
+
+                // 加载文件列表
+                const filesRes = await fetch(`/api/v1/torrents/${infohash}/files`);
+                const files = await filesRes.json();
+                const filesHtml = files.length > 0
+                    ? '<table><thead><tr><th>路径</th><th>大小</th></tr></thead><tbody>' +
+                      files.map(f => `<tr><td style="font-family:monospace;font-size:12px;">${escapeHtml(f.path)}</td><td>${formatSize(f.length)}</td></tr>`).join('') +
+                      '</tbody></table>'
+                    : '<div class="empty">无文件信息</div>';
+                document.getElementById('detail-files').innerHTML = filesHtml;
+
+                document.getElementById('detail-modal').classList.add('active');
+            } catch(e) { console.error(e); }
+        }
+
+        function closeDetail() {
+            document.getElementById('detail-modal').classList.remove('active');
+        }
+
+        function search() {
+            currentTab = 'search';
+            currentPage = 0;
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            loadTorrents();
+        }
+
+        function switchTab(tab, el) {
+            currentTab = tab;
+            currentPage = 0;
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            el.classList.add('active');
+            loadTorrents();
+        }
+
+        function formatSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(1024));
+            return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + units[i];
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        document.getElementById('search-input').addEventListener('keypress', e => {
+            if (e.key === 'Enter') search();
+        });
+
+        loadStats();
+        loadTorrents();
+        setInterval(loadStats, 30000);
+    </script>
+</body>
+</html>

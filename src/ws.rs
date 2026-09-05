@@ -161,6 +161,25 @@ pub async fn notify_new_task(state: &Arc<AppState>) {
     state.ws_mgr.broadcast(&ServerMsg::NewTask).await;
 }
 
+/// 通知所有节点：服务注册中心有变更（Agent 上下线/能力更新）
+pub async fn notify_service_changed(
+    state: &Arc<AppState>,
+    event: &crate::models::ServiceChangedEvent,
+) {
+    let msg = ServerMsg::ServiceChanged {
+        agent_id: event.agent_id,
+        change_type: event.change_type.clone(),
+        agent_type: event.agent_type.clone(),
+        capabilities: event.capabilities.clone(),
+        host: event.host.clone(),
+        port: event.port,
+        region: event.region.clone(),
+        health: event.health.clone(),
+        load: event.load,
+    };
+    state.ws_mgr.broadcast(&msg).await;
+}
+
 // ── WebSocket 处理 ────────────────────────────────────────
 pub async fn ws_handler(
     Query(params): Query<HashMap<String, String>>,
@@ -407,6 +426,7 @@ async fn handle_client_msg(
                     Ok(())
                 })
                 .await?;
+
             tracing::info!(
                 "[ws] 节点注册(旧协议) node_id={} hostname={}",
                 node_id,
@@ -448,6 +468,16 @@ async fn handle_client_msg(
                     Ok(())
                 })
                 .await?;
+            // 同步更新服务注册中心健康状态
+            let load = if active_tasks > 0 {
+                (active_tasks as f32 / 4.0).min(1.0)
+            } else {
+                0.0
+            };
+            state
+                .service_registry
+                .update_health(node_id, "healthy", load)
+                .await;
         }
     }
     // 任何节点消息都可能导致前端需要更新，标记脏数据，50ms内推送

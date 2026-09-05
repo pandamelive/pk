@@ -1,5 +1,7 @@
 use crate::config::PkConfig;
 use crate::models::*;
+use crate::service_registry::ServiceRegistry;
+use crate::torrent_index::TorrentIndexDb;
 use crate::ws::{FrontendWsManager, WsManager};
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -14,8 +16,10 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub artifacts_dir: PathBuf,
     pub ws_mgr: WsManager,
+    pub service_registry: ServiceRegistry,
     pub frontend_ws_mgr: FrontendWsManager,
     pub conn: Mutex<Connection>,
+    pub torrent_index: Arc<TorrentIndexDb>,
 }
 
 impl AppState {
@@ -92,6 +96,10 @@ impl AppState {
             std::fs::rename(&json_path, &bak).ok();
         }
 
+        let torrent_index = Arc::new(
+            TorrentIndexDb::open(data_dir.join("torrent_index.db"))
+                .context("open torrent_index db")?,
+        );
         // 首次启动：tasks 表为空时预置默认任务
         seed_default_tasks(&conn)?;
 
@@ -101,8 +109,10 @@ impl AppState {
             data_dir,
             artifacts_dir,
             ws_mgr: WsManager::new(),
+            service_registry: ServiceRegistry::new(),
             frontend_ws_mgr: FrontendWsManager::new(),
             conn: Mutex::new(conn),
+            torrent_index,
         }))
     }
 
@@ -156,6 +166,11 @@ impl AppState {
             params![cutoff],
         )
         .ok();
+        drop(conn);
+        // 同步更新服务注册中心：超时节点标记为 unhealthy
+        self.service_registry
+            .mark_timeout_unhealthy(self.cfg.heartbeat_timeout_secs as i64)
+            .await;
     }
 }
 
