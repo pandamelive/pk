@@ -1,11 +1,12 @@
 [package]
 name = "pk"
-version = "0.4.1"
+version = "1.2.0"
 edition = "2021"
 description = "PK — PandaNetPL 主控，负责生成、下发并控制 SPDE 节点"
 license = "MIT"
 
 [dependencies]
+pandanetos = { path = "../PandaNetOS/crates/pandanetos" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "macros", "ws"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -24,6 +25,13 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
+
 [[bin]]
 name = "pk"
 path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

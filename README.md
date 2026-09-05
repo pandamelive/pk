@@ -1,6 +1,48 @@
 # PK
 
-PandaNetPL 生态主控：生成、下发并控制 [SPDE](https://github.com/pandamelive/spde) 节点。Rust 实现，内置 Web UI。
+PandaNetOS 生态主控：生成、下发并控制 [SPDE](https://github.com/pandamelive/spde) 节点。Rust 实现，内置 Web UI。
+
+## 功能特性
+
+- **多节点调度**：支持多个 spde 下载节点统一管理和任务分发
+- **智能负载均衡**：根据节点负载和带宽自动分配下载任务
+- **实时进度监控**：WebSocket 实时推送下载进度、速度、连接数
+- **任务队列管理**：支持任务优先级、暂停、恢复、取消
+- **HTTP API**：完整的 RESTful API 供第三方系统集成
+- **节点审批机制**：新节点接入需要管理员审批
+- **配置热更新**：全局配置和节点配置支持运行时修改
+- **PandaNetOS 标准库**：基于 PandaNetOS 标准库构建，统一协议和规范
+
+## 生态标准
+
+本项目属于 **PandaNetOS 生态项目群**，遵循全系统权威标准仓库 [PandaNetOS](https://github.com/PandaNetOS/PandaNetOS) 的规范。
+
+### 标准库路径约定
+
+强制依赖 `pandanetos` 共享标准库，使用 **path 依赖**，目录布局固定：
+
+```
+<workspace>/
+├── PandaNetOS/              # 标准库仓库（必须与 pk 同级）
+│   └── crates/pandanetos/
+└── pk/                      # 本仓库
+    └── Cargo.toml           # pandanetos = { path = "../PandaNetOS/crates/pandanetos" }
+```
+
+`Cargo.toml` 中的依赖声明：
+
+```toml
+[dependencies]
+pandanetos = { path = "../PandaNetOS/crates/pandanetos" }
+```
+
+> 克隆本仓库后，需同时克隆 `PandaNetOS/PandaNetOS` 到同级目录，否则 `cargo build` 会因找不到 path 依赖而失败。
+
+### 规范要求
+
+- **强制依赖** `pandanetos` 共享库，统一协议路径常量（`protocol::paths`）、响应格式（`ApiResponse`/`ApiError`）、错误码与配置标准，**禁止**维护私有协议与常量。
+- **标准一致性**：API 路径、响应格式、文件布局与文档规范均以 PandaNetOS《标准规范》为准。
+- 一行导入所有常用类型：`use pandanetos::prelude::*;`
 
 - 节点注册 / 心跳 / 在线状态
 - 下载任务创建与调度（任一节点 / 全部节点 / 指定节点）
@@ -85,3 +127,37 @@ spde_defaults:
   connections_per_file: 8
   save_path: "./download"
 ```
+
+## 开发指南
+
+### 环境要求
+
+- Rust 1.75+
+- PandaNetOS 标准库（同级目录）
+
+### 构建
+
+```bash
+cargo build --release
+```
+
+### 测试
+
+```bash
+cargo test --all
+```
+
+### 合规检查
+
+```bash
+bash ../PandaNetOS/scripts/check_compliance.sh .
+```
+
+## 贡献指南
+
+欢迎提交 Issue 和 Pull Request。提交前请确保通过合规检查。
+
+
+## License
+
+MIT

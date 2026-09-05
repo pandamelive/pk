@@ -80,7 +80,10 @@ impl PdcClient {
         }
 
         let stats: PdcStats = resp.json().await.context("解析 PDC 统计失败")?;
-        debug!("[pdc] 统计: nodes={}, infohashes={}", stats.dht_nodes, stats.dht_infohashes);
+        debug!(
+            "[pdc] 统计: nodes={}, infohashes={}",
+            stats.dht_nodes, stats.dht_infohashes
+        );
         Ok(stats)
     }
 

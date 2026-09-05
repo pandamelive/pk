@@ -8,6 +8,7 @@ pub enum NodeStatus {
     Online,
     Offline,
     Busy,
+    Pending,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -23,19 +24,15 @@ pub enum TaskStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AssignmentTarget {
     /// 所有在线节点各执行一份
     All,
     /// 调度到负载最低的一个节点
+    #[default]
     Any,
     /// 指定节点
     Nodes,
-}
-
-impl Default for AssignmentTarget {
-    fn default() -> Self {
-        AssignmentTarget::Any
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +49,21 @@ pub struct Node {
     pub active_tasks: u32,
     pub bytes_downloaded: u64,
     pub last_error: Option<String>,
+    /// 节点最大并发任务数（None=用全局默认）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
+    /// 节点最大带宽上限 bps（None=不限制）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bandwidth_bps: Option<u64>,
+    /// 节点通用能力参数（JSON，灵活扩展）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<serde_json::Value>,
+    /// 实时总速度（bps），从内存态填充
+    #[serde(default)]
+    pub total_speed_bps: u64,
+    /// 活跃任务实时进度列表，从内存态填充
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_tasks_progress: Vec<crate::ws::TaskProgressState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -278,6 +290,17 @@ pub struct NodeConfig {
     pub tasks: Vec<TaskItem>,
 }
 
+/// claim 接口返回给 spde 节点的任务信息（与 spde 的 ClaimResp 对应）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimTaskResp {
+    pub dispatch_id: Uuid,
+    pub task_id: Uuid,
+    pub name: String,
+    pub url: String,
+    pub filename: String,
+    pub overrides: TaskOverrides,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowDetail {
     pub workflow: Workflow,
@@ -303,6 +326,15 @@ pub struct AgentRegisterReq {
     pub version: String,
     #[serde(default)]
     pub labels: Vec<String>,
+    /// 节点上报的最大并发任务数
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
+    /// 节点上报的最大带宽上限 bps
+    #[serde(default)]
+    pub max_bandwidth_bps: Option<u64>,
+    /// 节点上报的通用能力参数（JSON，灵活扩展）
+    #[serde(default)]
+    pub capabilities: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,11 +342,12 @@ pub struct AgentRegisterResp {
     pub node_id: Uuid,
     pub poll_interval_secs: u64,
     pub master_listen: String,
+    /// 节点注册后的状态（online/pending）
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentHeartbeatReq {
-    pub node_id: Uuid,
     #[serde(default)]
     pub active_tasks: u32,
     #[serde(default)]

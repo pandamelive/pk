@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pk::{api, web, workflow_scheduler, AppState, PkConfig};
+use pk::{api, manifest, web, workflow_scheduler, ws, AppState, PkConfig};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
@@ -14,6 +14,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// 输出自描述能力清单（说明书）
+    Manifest,
     /// 启动主控 HTTP + Web UI
     Serve {
         /// 配置文件路径（默认：可执行文件同级 pk-controlcenter/config.yaml）
@@ -35,6 +37,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.cmd {
+        Commands::Manifest => {
+            manifest::print_manifest();
+            Ok(())
+        }
         Commands::Serve { config, listen } => run_serve(config, listen).await,
     }
 }
@@ -60,6 +66,8 @@ async fn run_serve(config: Option<PathBuf>, listen: Option<String>) -> Result<()
 
     // 启动工作流后台调度器
     workflow_scheduler::start(state.clone()).await;
+    // 启动前端 WebSocket 实时状态广播（每秒推送一次）
+    ws::spawn_realtime_broadcaster(state.clone());
 
     let app = api::router(state.clone());
     let app = web::mount(app);
@@ -69,9 +77,12 @@ async fn run_serve(config: Option<PathBuf>, listen: Option<String>) -> Result<()
     tracing::info!("Web UI: http://{addr}/");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await?;
     Ok(())
 }
 

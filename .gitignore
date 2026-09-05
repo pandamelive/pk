@@ -3,3 +3,10 @@ pk-controlcenter
 pk-data
 *.exe
 .DS_Store
+.idea/
+*.swp
+*.swo
+
+# 调试输出文件
+check_output*.txt
+*.log

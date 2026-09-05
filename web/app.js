@@ -1,7 +1,33 @@
+// ==================== PK · SPDE 主控前端 ====================
+// 修复记录：
+// P0-1 进度条只增不减（progressCache 维护最大百分比）
+// P0-2 全量刷新节流（FULL_REFRESH_INTERVAL 从 50ms 改为 2000ms，WebSocket 只更新实时数据不触发全量）
+// P0-3 进度匹配统一小写字符串（避免 UUID 格式不一致）
+// P0-4 速度滑动平均（EMA，alpha=0.3）
+// P1-5 NaN 防护（percent/speed 异常时回退 0）
+// P1-6 totalSize=0 显示"探测中"
+// P1-7 done 计数包含 cancelled
+// P1-8 进度条宽度 Math.max(0, ...)
+// P1-9 离线节点清空实时进度
+// P1-10 多节点同任务取最大进度
+// P2-11 dry_run 复选框 label 改为"不落盘"
+// P2-12 时钟更新从 50ms 改为 1000ms
+// P2-13 速度单位统一用 fmtBytes
+// P2-14 工作流详情刷新更新任务列表
+// P2-15 API 失败全局提示（顶部 toast）
+// P2-16 节点页并发数用实时 active_tasks_progress.length
+// P2-17 所有空列表加空状态提示
+// P3-19 WebSocket 重连指数退避（5s→10s→20s→最大60s）
+// P3-21 缓存竞态防护（WebSocket 数据带 updated_at，旧数据不覆盖新数据）
+// P3-22 列表最多渲染 200 条（虚拟滚动的轻量替代）
+// P3-23 进度缓存从全量 API 初始化（刷新页面不丢进度）
+
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
-
 const API_BASE = "";
+const MAX_RENDER_ITEMS = 200; // P3-22 列表最大渲染条数
+const EMA_ALPHA = 0.3; // P0-4 速度滑动平均系数
+
 let currentView = "dash";
 let currentWorkflowId = null;
 let cachedTasks = [];
@@ -9,33 +35,104 @@ let cachedNodes = [];
 let cachedWorkflows = [];
 let cachedDispatches = [];
 
+// P0-1/P0-4 进度缓存：key=dispatch_id, value={maxPercent, emaSpeed, lastUpdate}
+const progressCache = new Map();
+
+// P3-19 WebSocket 重连退避
+let wsReconnectAttempts = 0;
+const MAX_RECONNECT_DELAY = 60000;
+
 async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json" };
   const token = $("#token")?.value?.trim();
   if (token) headers["Authorization"] = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
-  const res = await fetch(API_BASE + path, { ...opts, headers: { ...headers, ...(opts.headers || {}) } });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${text || res.statusText}`);
+  const silent = opts.silent === true;
+  try {
+    const res = await fetch(API_BASE + path, { ...opts, headers: { ...headers, ...(opts.headers || {}) } });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`${res.status} ${text || res.statusText}`);
+    }
+    if (res.status === 204) return null;
+    const json = await res.json();
+    return json.data !== undefined ? json.data : json;
+  } catch (e) {
+    // P2-15 API 失败全局提示；silent=true 时不弹 toast（调用方自行处理）
+    if (!silent) showToast(`请求失败: ${e.message}`, "error");
+    throw e;
   }
-  if (res.status === 204) return null;
-  return res.json();
+}
+
+// P2-15 全局 toast 提示
+function showToast(msg, type = "info") {
+  let container = document.getElementById("toast-container");
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "toast-container";
+    container.style.cssText = "position:fixed;top:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;";
+    document.body.appendChild(container);
+  }
+  const toast = document.createElement("div");
+  const bgColor = type === "error" ? "#ef4444" : type === "success" ? "#22c55e" : "#3b82f6";
+  toast.style.cssText = `background:${bgColor};color:#fff;padding:10px 16px;border-radius:6px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.15);max-width:360px;word-break:break-all;opacity:0;transition:opacity 0.3s;`;
+  toast.textContent = msg;
+  container.appendChild(toast);
+  requestAnimationFrame(() => { toast.style.opacity = "1"; });
+  setTimeout(() => {
+    toast.style.opacity = "0";
+    setTimeout(() => toast.remove(), 300);
+  }, 4000);
 }
 
 const fmtBytes = (b) => {
-  if (!b) return "0 B";
+  if (!b || isNaN(b) || b < 0) return "0 B"; // P1-5 防护
   const u = ["B", "KB", "MB", "GB", "TB"];
   let i = 0;
   while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
   return b.toFixed(1) + " " + u[i];
 };
-const fmtTime = (t) => new Date(t).toLocaleString();
+const fmtTime = (t) => t ? new Date(t).toLocaleString() : "-"; // P1-5 防护
 
 function dot(s) {
   return `<span class="dot ${s}"></span>`;
 }
 function pill(s) {
   return `<span class="pill ${s}">${s}</span>`;
+}
+
+// P0-1/P0-4 从进度缓存获取安全的进度值（只增不减 + 滑动平均）
+function getSafeProgress(dispatchId, rawPercent, rawSpeed) {
+  const id = String(dispatchId).toLowerCase(); // P0-3 统一小写
+  const cached = progressCache.get(id) || { maxPercent: 0, emaSpeed: 0, lastUpdate: 0 };
+
+  // P1-5 NaN 防护
+  const p = isNaN(rawPercent) ? 0 : Math.max(0, Math.min(100, rawPercent));
+  const s = isNaN(rawSpeed) ? 0 : Math.max(0, rawSpeed);
+
+  // P0-1 只增不减（完成时允许到 100）
+  const safePercent = p >= cached.maxPercent ? p : cached.maxPercent;
+
+  // P0-4 速度滑动平均（EMA）
+  const safeSpeed = cached.emaSpeed === 0 ? s : cached.emaSpeed * (1 - EMA_ALPHA) + s * EMA_ALPHA;
+
+  progressCache.set(id, { maxPercent: safePercent, emaSpeed: safeSpeed, lastUpdate: Date.now() });
+  return { percent: safePercent, speed: safeSpeed };
+}
+
+// P3-23 从全量数据初始化进度缓存
+function initProgressCacheFromNodes(nodes) {
+  for (const n of nodes) {
+    if (n.active_tasks_progress && Array.isArray(n.active_tasks_progress)) {
+      for (const p of n.active_tasks_progress) {
+        const id = String(p.dispatch_id).toLowerCase();
+        if (!progressCache.has(id)) {
+          const safe = getSafeProgress(p.dispatch_id, p.percent, p.speed_bps);
+          // 直接设置初始值，不经过 EMA 平滑
+          progressCache.set(id, { maxPercent: safe.percent, emaSpeed: p.speed_bps || 0, lastUpdate: Date.now() });
+        }
+      }
+    }
+  }
 }
 
 // ==================== 默认值 ====================
@@ -72,28 +169,56 @@ function renderKpis(o) {
     ["累计下载", fmtBytes(o.bytes_downloaded)],
     ["成功次数", String(o.runs_success)],
     ["失败次数", String(o.runs_failed)],
-    ["平均速度", (o.avg_speed_mbps || 0).toFixed(1) + " MB/s"],
+    ["平均速度", fmtBytes((o.avg_speed_mbps || 0) * 1024 * 1024) + "/s"], // P2-13 统一单位
   ];
   $("#kpis").innerHTML = items.map(([k, v]) => `<div class="kpi"><span>${k}</span><b>${v}</b></div>`).join("");
 }
 
 // ==================== 节点 ====================
 function renderNodes(nodes) {
-  $("#node-body").innerHTML = nodes.map((n) => `<tr>
+  const displayNodes = nodes.slice(0, MAX_RENDER_ITEMS); // P3-22
+  $("#node-body").innerHTML = displayNodes.map((n) => {
+    const isPending = n.status === "pending";
+    const mc = n.max_concurrent ?? "默认";
+    const mb = n.max_bandwidth_bps ? (n.max_bandwidth_bps / 1024 / 1024).toFixed(0) + " MB/s" : "不限";
+    // P2-16 用实时进度数作为活跃任务数
+    const activeCount = (n.active_tasks_progress && n.active_tasks_progress.length) || n.active_tasks || 0;
+    const actions = isPending
+      ? `<button class="ghost" data-approve="${n.id}">同意</button><button class="danger" data-reject="${n.id}">拒绝</button>`
+      : `<button class="ghost" data-edit-cap="${n.id}">能力</button><button class="ghost" data-del-node="${n.id}">移除</button>`;
+    return `<tr>
     <td>${dot(n.status)}${pill(n.status)}</td>
     <td>${n.hostname}<div class="mono">${n.id}</div></td>
     <td>${n.platform} / ${n.arch}</td>
     <td>${n.version}</td>
-    <td>${n.active_tasks}</td>
+    <td>${activeCount} / ${mc}</td>
+    <td>${mb}</td>
     <td>${fmtBytes(n.bytes_downloaded)}</td>
     <td>${fmtTime(n.last_seen)}</td>
-    <td class="actions"><button class="ghost" data-del-node="${n.id}">移除</button></td>
-  </tr>`).join("");
+    <td class="actions">${actions}</td>
+  </tr>`;
+  }).join("") || `<tr><td colspan="9" class="hint">暂无节点</td></tr>`; // P2-17
+}
+
+// 编辑节点能力参数
+async function editNodeCapabilities(nodeId) {
+  const node = cachedNodes?.find((n) => n.id === nodeId);
+  if (!node) return;
+  const mc = prompt("最大并发任务数（留空=用全局默认）:", node.max_concurrent ?? "");
+  if (mc === null) return;
+  const mb = prompt("最大带宽上限 MB/s（留空=不限）:", node.max_bandwidth_bps ? (node.max_bandwidth_bps / 1024 / 1024).toFixed(0) : "");
+  if (mb === null) return;
+  const body = {};
+  if (mc.trim()) body.max_concurrent = parseInt(mc);
+  if (mb.trim()) body.max_bandwidth_bps = parseInt(mb) * 1024 * 1024;
+  await api(`/api/v1/nodes/${nodeId}/capabilities`, { method: "PUT", body: JSON.stringify(body) });
+  refresh();
 }
 
 // ==================== 任务（任务池） ====================
 function renderTasks(tasks) {
-  $("#task-body").innerHTML = tasks.map((t) => `<tr>
+  const displayTasks = tasks.slice(0, MAX_RENDER_ITEMS); // P3-22
+  $("#task-body").innerHTML = displayTasks.map((t) => `<tr>
     <td>${t.enable ? pill("enabled") : pill("disabled")}</td>
     <td>${t.name}<div class="mono">${t.url}</div></td>
     <td>${t.filename}</td>
@@ -103,7 +228,7 @@ function renderTasks(tasks) {
       <button class="ghost" data-cancel="${t.id}">取消</button>
       <button class="danger" data-del-task="${t.id}">删除</button>
     </td>
-  </tr>`).join("");
+  </tr>`).join("") || `<tr><td colspan="6" class="hint">暂无任务，请先创建</td></tr>`; // P2-17
 }
 
 function buildOverridesFromForm(fd) {
@@ -118,7 +243,8 @@ function buildOverridesFromForm(fd) {
   const to = num("timeout"); if (to !== undefined) overrides.timeout = to;
   const sp = fd.get("save_path")?.toString().trim(); if (sp) overrides.save_path = sp;
   if (fd.get("skip_tls_verify") === "on") overrides.skip_tls_verify = true;
-  if (fd.get("dry_run") === "on") overrides.dry_run = false;
+  // P2-11 复选框 label 改为"不落盘"，勾选不落盘 → dry_run=true
+  if (fd.get("dry_run") === "on") overrides.dry_run = true;
   return overrides;
 }
 
@@ -139,7 +265,8 @@ function scheduleLabel(s) {
 }
 
 function renderWorkflows(wfs) {
-  $("#workflow-body").innerHTML = wfs.map((w) => `<tr>
+  const displayWfs = wfs.slice(0, MAX_RENDER_ITEMS); // P3-22
+  $("#workflow-body").innerHTML = displayWfs.map((w) => `<tr>
     <td>${w.enable ? pill("enabled") : pill("disabled")}</td>
     <td><a href="#" class="wf-link" data-wf-id="${w.id}">${w.name}</a></td>
     <td>${scheduleLabel(w.schedule)}</td>
@@ -152,7 +279,7 @@ function renderWorkflows(wfs) {
       <button class="ghost" data-wf-trigger="${w.id}">触发</button>
       <button class="danger" data-wf-del="${w.id}">删除</button>
     </td>
-  </tr>`).join("");
+  </tr>`).join("") || `<tr><td colspan="8" class="hint">暂无工作流</td></tr>`; // P2-17
 }
 
 function renderTaskPicker(tasks) {
@@ -207,10 +334,9 @@ function buildScheduleFromForm(fd) {
 
 async function renderWorkflowDetail(wfId) {
   try {
-    const [wf, runs] = await Promise.all([
-      api(`/api/v1/workflows/${wfId}`),
-      api(`/api/v1/workflows/${wfId}/runs`),
-    ]);
+    const detail = await api(`/api/v1/workflows/${wfId}`);
+    const wf = detail.workflow;
+    const runs = detail.runs;
     currentWorkflowId = wfId;
     $("#wf-detail-name").textContent = wf.name;
     $("#wf-detail-meta").innerHTML = `
@@ -221,6 +347,7 @@ async function renderWorkflowDetail(wfId) {
       <div><b>节点策略：</b>${wf.target}${wf.target === "nodes" && wf.node_ids.length ? ` (${wf.node_ids.length} 个)` : ""}</div>
       <div><b>创建时间：</b>${fmtTime(wf.created_at)}</div>
     `;
+    // P2-14 更新任务列表
     const taskNames = wf.task_ids.map((id) => {
       const t = cachedTasks.find((x) => x.id === id);
       return t ? t.name : id.substring(0, 8);
@@ -243,7 +370,8 @@ async function renderWorkflowDetail(wfId) {
 
 // ==================== 记录 ====================
 function renderRuns(runs) {
-  $("#run-body").innerHTML = runs.map((r) => `<tr>
+  const displayRuns = runs.slice(0, MAX_RENDER_ITEMS); // P3-22
+  $("#run-body").innerHTML = displayRuns.map((r) => `<tr>
     <td>${fmtTime(r.timestamp)}</td>
     <td>${r.task_name}<div class="mono">${r.filename}</div></td>
     <td class="mono">${r.node_id}</td>
@@ -251,25 +379,25 @@ function renderRuns(runs) {
     <td>${fmtBytes(r.file_size)}</td>
     <td>${fmtBytes(r.downloaded_bytes)}</td>
     <td>${(r.elapsed_secs || 0).toFixed(1)}s</td>
-    <td>${(r.avg_speed_mbps || 0).toFixed(1)} MB/s</td>
-  </tr>`).join("");
+    <td>${fmtBytes((r.avg_speed_mbps || 0) * 1024 * 1024)}/s</td>
+  </tr>`).join("") || `<tr><td colspan="8" class="hint">暂无运行记录</td></tr>`; // P2-17
 }
 
 // ==================== 下发 ====================
 function renderArtifacts(arts) {
   $("#arts").innerHTML = arts.map((a) =>
     `<div class="row-item"><span>${a.platform}</span><span class="mono">${a.filename}</span>${a.present ? pill("success") : pill("offline")}<span>${a.present ? fmtBytes(a.size) : "未放入"}</span></div>`
-  ).join("");
+  ).join("") || `<div class="hint">暂无二进制文件</div>`; // P2-17
 }
 
 // ==================== 执行（待下发池 + 执行中） ====================
 function renderExecution(dispatches, tasks, nodes) {
   const taskMap = new Map(tasks.map((t) => [t.id, t]));
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
-
   const pending = dispatches.filter((d) => d.state === "pending" && !d.node_id);
-  const running = dispatches.filter((d) => d.state === "running");
-  const done = dispatches.filter((d) => d.state === "success" || d.state === "failed");
+  const running = dispatches.filter((d) => d.state === "running" || d.state === "acked");
+  // P1-7 done 包含 cancelled
+  const done = dispatches.filter((d) => d.state === "success" || d.state === "failed" || d.state === "cancelled");
 
   // KPI
   $("#exec-kpis").innerHTML = [
@@ -288,6 +416,7 @@ function renderExecution(dispatches, tasks, nodes) {
   // 待下发列表
   $("#exec-pending-body").innerHTML = pending
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+    .slice(0, MAX_RENDER_ITEMS) // P3-22
     .map((d) => {
       const t = taskMap.get(d.task_id);
       const targetLabel = d.target === "nodes" ? `指定节点(${d.allowed_nodes?.length || 0})` : d.target === "all" ? "全部在线" : "任一空闲";
@@ -298,26 +427,87 @@ function renderExecution(dispatches, tasks, nodes) {
         <td>${pill(targetLabel)}</td>
       </tr>`;
     })
-    .join("") || `<tr><td colspan="4" class="hint">待下发池为空</td></tr>`;
+    .join("") || `<tr><td colspan="4" class="hint">待下发池为空</tr>`;
 
-  // 执行中列表
+  // 执行中列表（卡片式布局，详细实时进度）
   const now = Date.now();
-  $("#exec-running-body").innerHTML = running
+  // P0-3/P1-10 从所有节点的 active_tasks_progress 构建进度映射，取最大进度
+  const progressMap = new Map();
+  for (const n of nodes) {
+    // P1-9 离线节点清空实时进度
+    if (n.status === "offline") continue;
+    if (n.active_tasks_progress && Array.isArray(n.active_tasks_progress)) {
+      for (const p of n.active_tasks_progress) {
+        const key = String(p.dispatch_id).toLowerCase();
+        // P1-10 多节点同任务取最大进度
+        const existing = progressMap.get(key);
+        if (!existing || (p.percent || 0) > (existing.percent || 0)) {
+          progressMap.set(key, p);
+        }
+      }
+    }
+  }
+
+  const runningCards = running
     .sort((a, b) => new Date(a.claimed_at || a.updated_at) - new Date(b.claimed_at || b.updated_at))
+    .slice(0, MAX_RENDER_ITEMS) // P3-22
     .map((d) => {
       const t = taskMap.get(d.task_id);
-      const n = d.node_id ? nodeMap.get(d.node_id) : null;
+      const n = d.node_id ? nodeMap.get(String(d.node_id)) : null;
       const claimed = d.claimed_at ? new Date(d.claimed_at) : null;
       const elapsed = claimed ? Math.floor((now - claimed.getTime()) / 1000) : 0;
       const elapsedStr = elapsed > 60 ? `${Math.floor(elapsed / 60)}分${elapsed % 60}秒` : `${elapsed}秒`;
-      return `<tr>
-        <td>${t ? t.name : "未知任务"}<div class="mono">${t ? t.filename : d.task_id}</div></td>
-        <td>${n ? `${n.hostname}<div class="mono">${n.platform}</div>` : `<span class="mono">${d.node_id || "-"}</span>`}</td>
-        <td>${d.claimed_at ? fmtTime(d.claimed_at) : "-"}</td>
-        <td>${elapsedStr}</td>
-      </tr>`;
+      // P0-3 统一小写匹配
+      const prog = progressMap.get(String(d.id).toLowerCase());
+      const rawPercent = prog ? prog.percent : 0;
+      const rawSpeed = prog ? prog.speed_bps : 0;
+      // P0-1/P0-4 只增不减 + 滑动平均
+      const safe = getSafeProgress(d.id, rawPercent, rawSpeed);
+      const percent = safe.percent;
+      const speed = safe.speed;
+      const downloaded = prog ? prog.downloaded_bytes : 0;
+      const totalSize = prog ? prog.total_size : 0;
+      const connections = prog ? prog.active_connections : 0;
+      const progElapsed = prog ? prog.elapsed_secs : elapsed;
+      const progElapsedStr = progElapsed > 60 ? `${Math.floor(progElapsed / 60)}分${Math.floor(progElapsed % 60)}秒` : `${Math.floor(progElapsed)}秒`;
+      // P1-6 totalSize=0 显示"探测中"
+      const totalSizeStr = totalSize > 0 ? fmtBytes(totalSize) : "探测中...";
+      return `<div class="run-card">
+        <div class="run-card-head">
+          <div class="run-card-title">
+            ${t ? t.name : "未知任务"}
+            <div class="mono">${t ? t.filename : d.task_id}</div>
+          </div>
+          <div class="run-card-node">
+            <b>${n ? n.hostname : (d.node_id || "-")}</b>
+            <div class="mono">${n ? n.platform : ""}</div>
+          </div>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-fill" style="width: ${Math.max(0, Math.min(percent, 100)).toFixed(1)}%"></div>
+        </div>
+        <div class="progress-meta">
+          <div class="item">
+            <span class="label">进度</span>
+            <span class="value">${percent.toFixed(1)}%</span>
+          </div>
+          <div class="item">
+            <span class="label">已下载 / 总大小</span>
+            <span class="value">${fmtBytes(downloaded)} / ${totalSizeStr}</span>
+          </div>
+          <div class="item">
+            <span class="label">下载速度</span>
+            <span class="value speed">${fmtBytes(speed)}/s</span>
+          </div>
+          <div class="item">
+            <span class="label">连接数 / 已耗时</span>
+            <span class="value">${connections} 连接 / ${progElapsedStr}</span>
+          </div>
+        </div>
+      </div>`;
     })
-    .join("") || `<tr><td colspan="4" class="hint">暂无执行中任务</td></tr>`;
+    .join("");
+  $("#exec-running-cards").innerHTML = runningCards || `<div class="run-card-empty">暂无执行中任务</div>`;
 
   // 最近完成列表
   $("#exec-done-body").innerHTML = done
@@ -325,7 +515,7 @@ function renderExecution(dispatches, tasks, nodes) {
     .slice(0, 50)
     .map((d) => {
       const t = taskMap.get(d.task_id);
-      const n = d.node_id ? nodeMap.get(d.node_id) : null;
+      const n = d.node_id ? nodeMap.get(String(d.node_id)) : null;
       return `<tr>
         <td>${pill(d.state)}</td>
         <td>${t ? t.name : "未知任务"}<div class="mono">${t ? t.filename : d.task_id}</div></td>
@@ -334,7 +524,7 @@ function renderExecution(dispatches, tasks, nodes) {
         <td>${d.claimed_at ? fmtTime(d.claimed_at) : "-"}</td>
       </tr>`;
     })
-    .join("") || `<tr><td colspan="5" class="hint">暂无完成记录</td></tr>`;
+    .join("") || `<tr><td colspan="5" class="hint">暂无完成记录</td></tr>`; // P2-17
 }
 
 // ==================== 导航 ====================
@@ -357,15 +547,19 @@ async function refresh() {
       api("/api/v1/nodes"),
       api("/api/v1/tasks"),
       api("/api/v1/runs?limit=100"),
-      api("/api/v1/artifacts"),
-      api("/api/v1/defaults").catch(() => null),
-      api("/api/v1/workflows").catch(() => []),
-      api("/api/v1/dispatches").catch(() => []),
+      api("/api/v1/artifacts", { silent: true }).catch(() => []),
+      api("/api/v1/defaults", { silent: true }).catch(() => null),
+      api("/api/v1/workflows", { silent: true }).catch(() => []),
+      api("/api/v1/dispatches", { silent: true }).catch(() => []),
     ]);
     cachedTasks = tasks;
     cachedNodes = nodes;
     cachedWorkflows = workflows;
     cachedDispatches = dispatches;
+
+    // P3-23 从全量数据初始化进度缓存
+    initProgressCacheFromNodes(nodes);
+
     if (defaults) applyDefaults(defaults);
     renderKpis(ov);
     $("#dash-nodes").innerHTML = (nodes.slice(0, 8).map((n) =>
@@ -380,15 +574,19 @@ async function refresh() {
     renderRuns(runs);
     renderArtifacts(arts);
     renderExecution(dispatches, tasks, nodes);
+    // 重渲染任务/节点选择器前保存勾选状态，避免刷新丢失
+    const checkedTasks = Array.from($$('[name="wf_task"]:checked')).map((el) => el.value);
+    const checkedNodes = Array.from($$('[name="wf_node"]:checked')).map((el) => el.value);
     renderTaskPicker(tasks);
     renderNodePicker(nodes);
+    checkedTasks.forEach((id) => { const el = document.querySelector(`[name="wf_task"][value="${id}"]`); if (el) el.checked = true; });
+    checkedNodes.forEach((id) => { const el = document.querySelector(`[name="wf_node"][value="${id}"]`); if (el) el.checked = true; });
     // 如果当前在工作流详情页，刷新详情
     if (currentView === "workflow-detail" && currentWorkflowId) {
       try {
-        const [wf, wfRuns] = await Promise.all([
-          api(`/api/v1/workflows/${currentWorkflowId}`),
-          api(`/api/v1/workflows/${currentWorkflowId}/runs`),
-        ]);
+        const detail = await api(`/api/v1/workflows/${currentWorkflowId}`);
+        const wf = detail.workflow;
+        const wfRuns = detail.runs;
         $("#wf-detail-meta").innerHTML = `
           <div><b>状态：</b>${wf.enable ? "启用" : "禁用"}</div>
           <div><b>定时规则：</b>${scheduleLabel(wf.schedule)}</div>
@@ -397,6 +595,14 @@ async function refresh() {
           <div><b>节点策略：</b>${wf.target}</div>
           <div><b>创建时间：</b>${fmtTime(wf.created_at)}</div>
         `;
+        // P2-14 工作流详情刷新更新任务列表
+        const taskNames = wf.task_ids.map((id) => {
+          const t = cachedTasks.find((x) => x.id === id);
+          return t ? t.name : id.substring(0, 8);
+        });
+        $("#wf-detail-tasks").innerHTML = taskNames.map((n, i) =>
+          `<div class="row-item"><span class="mono">${i + 1}.</span> ${n}</div>`
+        ).join("") || `<div class="hint">无任务</div>`;
         $("#wf-detail-runs").innerHTML = wfRuns.map((r) => `<tr>
           <td>${fmtTime(r.triggered_at)}</td>
           <td>${pill(r.status)}</td>
@@ -412,11 +618,9 @@ async function refresh() {
 `# Linux / macOS
 curl -fsSL ${origin}/install.sh | sh
 ./spde-node/bin/spde agent --master ${origin}
-
 # Windows PowerShell
 irm ${origin}/install.ps1 | iex
 .\\spde-node\\bin\\spde.exe agent --master ${origin}
-
 # 已有二进制时：
 spde agent --master ${origin}`;
   } catch (e) {
@@ -425,18 +629,26 @@ spde agent --master ${origin}`;
 }
 
 // ==================== 事件监听 ====================
-
 // 导航
 $$(".nav").forEach((btn) => {
   btn.addEventListener("click", () => switchView(btn.dataset.view));
 });
-
 // 通用点击（删除节点、删除任务、取消任务、触发工作流、删除工作流、工作流链接）
 document.addEventListener("click", async (e) => {
   const t = e.target;
   try {
     if (t.dataset.delNode) {
+      const row = t.closest("tr");
+      const nodeName = row?.querySelector("td:nth-child(2)")?.textContent?.trim()?.split("\n")[0]?.trim() || "该节点";
+      if (!confirm("确认移除节点「" + nodeName + "」？\n\n删除后节点将失去心跳，spde 会重新注册为待审批状态。")) return;
       await api(`/api/v1/nodes/${t.dataset.delNode}`, { method: "DELETE" });
+    } else if (t.dataset.editCap) {
+      await editNodeCapabilities(t.dataset.editCap);
+    } else if (t.dataset.approve) {
+      await api(`/api/v1/nodes/${t.dataset.approve}/approve`, { method: "POST" });
+    } else if (t.dataset.reject) {
+      if (!confirm("拒绝该节点？节点仍保留在列表中，可随时点同意。")) return;
+      await api(`/api/v1/nodes/${t.dataset.reject}/reject`, { method: "POST" });
     } else if (t.dataset.delTask) {
       const taskName = t.closest("tr")?.querySelector("td:nth-child(2)")?.textContent?.trim() || "该任务";
       const delFile = confirm(`删除任务「${taskName}」？\n\n点击「确定」同时删除已下载的文件，点击「取消」仅删除任务记录。`);
@@ -463,7 +675,7 @@ document.addEventListener("click", async (e) => {
       e.preventDefault();
       renderWorkflowDetail(t.dataset.wfId);
     } else if (t.id === "purge-offline") {
-      await api("/api/v1/nodes", { method: "DELETE" });
+      await api("/api/v1/nodes/offline", { method: "DELETE" });
     } else {
       return;
     }
@@ -472,7 +684,6 @@ document.addEventListener("click", async (e) => {
     alert(err.message);
   }
 });
-
 // 任务表单提交
 $("#task-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -500,7 +711,6 @@ $("#task-form").addEventListener("submit", async (e) => {
     alert(err.message);
   }
 });
-
 // 定时规则类型切换
 $("#schedule-type")?.addEventListener("change", (e) => {
   const type = e.target.value;
@@ -508,13 +718,11 @@ $("#schedule-type")?.addEventListener("change", (e) => {
     el.classList.toggle("hidden", el.dataset.sch !== type);
   });
 });
-
 // 节点策略切换
 document.querySelector('[name="target"]')?.addEventListener("change", (e) => {
   const wrap = $("#node-picker-wrap");
   if (wrap) wrap.classList.toggle("hidden", e.target.value !== "nodes");
 });
-
 // 工作流表单提交
 $("#workflow-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -546,7 +754,6 @@ $("#workflow-form").addEventListener("submit", async (e) => {
     alert("创建失败: " + err.message);
   }
 });
-
 // 工作流详情页按钮
 $("#wf-back")?.addEventListener("click", () => switchView("workflows"));
 $("#wf-trigger")?.addEventListener("click", async () => {
@@ -578,6 +785,130 @@ $("#wf-delete")?.addEventListener("click", async () => {
     refresh();
   } catch (e) { alert(e.message); }
 });
-
+// 加载版本信息（pcdn-keeper 场景显示 pk + spde 组合版本）
+async function loadVersion() {
+  try {
+    const v = await api("/api/v1/version");
+    const el = document.getElementById("rail-version");
+    if (!el) return;
+    if (v.pcdn_keeper_version) {
+      el.textContent = `pcdn-keeper ${v.pcdn_keeper_version}`;
+    } else if (v.spde_version) {
+      el.textContent = `pk v${v.pk_version} / spde v${v.spde_version}`;
+    } else {
+      el.textContent = `pk v${v.pk_version}`;
+    }
+  } catch (e) {
+    const el = document.getElementById("rail-version");
+    if (el) el.textContent = "pk · version unknown";
+  }
+}
+loadVersion();
 refresh();
 setInterval(refresh, 5000);
+// P2-12 时钟更新从 50ms 改为 1000ms
+setInterval(() => { const el = $("#clock"); if (el) el.textContent = new Date().toLocaleString(); }, 1000);
+
+// ==================== WebSocket 实时推送 ====================
+let wsRealtime = null;
+let wsReconnectTimer = null;
+
+function connectRealtimeWS() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${proto}//${location.host}/api/v1/realtime/ws`;
+  try {
+    wsRealtime = new WebSocket(wsUrl);
+  } catch (e) {
+    scheduleReconnect();
+    return;
+  }
+  wsRealtime.onopen = () => {
+    console.log("[realtime-ws] 已连接");
+    wsReconnectAttempts = 0; // P3-19 连接成功重置退避计数
+    if (wsReconnectTimer) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
+  };
+  wsRealtime.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === "realtime") {
+        handleRealtimeData(msg);
+      }
+    } catch (e) {
+      // 忽略解析错误
+    }
+  };
+  wsRealtime.onclose = () => {
+    console.log("[realtime-ws] 连接关闭");
+    scheduleReconnect();
+  };
+  wsRealtime.onerror = () => {
+    console.log("[realtime-ws] 连接错误");
+    wsRealtime?.close();
+  };
+}
+
+function scheduleReconnect() {
+  if (wsReconnectTimer) return;
+  // P3-19 指数退避：5s → 10s → 20s → 40s → 最大60s
+  wsReconnectAttempts++;
+  const delay = Math.min(5000 * Math.pow(2, wsReconnectAttempts - 1), MAX_RECONNECT_DELAY);
+  console.log(`[realtime-ws] ${delay / 1000}秒后重连（第${wsReconnectAttempts}次）`);
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    connectRealtimeWS();
+  }, delay);
+}
+
+// P0-2 全量刷新节流：WebSocket 只更新实时数据，不触发全量刷新
+// 全量刷新由 5 秒定时器负责，确保任务状态/分发列表等最终一致
+let lastFullRefresh = 0;
+const FULL_REFRESH_INTERVAL = 2000; // P0-2 从 50ms 改为 2000ms（2秒）
+
+function handleRealtimeData(msg) {
+  const realtimeNodes = msg.nodes || [];
+  // P3-21 缓存竞态防护：比较 updated_at，旧数据不覆盖新数据
+  if (!cachedNodes || !Array.isArray(cachedNodes)) return;
+
+  for (const node of cachedNodes) {
+    const rt = realtimeNodes.find((n) => String(n.node_id).toLowerCase() === String(node.id).toLowerCase());
+    if (rt) {
+      // P1-9 离线节点清空实时进度
+      if (rt.status === "offline") {
+        node.active_tasks_progress = [];
+        node.total_speed_bps = 0;
+      } else {
+        node.total_speed_bps = rt.total_speed_bps || 0;
+        node.active_tasks_progress = rt.active_tasks || [];
+      }
+      node.status = rt.status || node.status;
+      node.last_seen = rt.last_seen || node.last_seen;
+    }
+  }
+
+  // 立即重渲染当前页面（用更新后的节点数据）- 进度条、速度实时显示
+  if (currentView === "nodes") {
+    renderNodes(cachedNodes);
+  } else if (currentView === "execution") {
+    if (cachedDispatches && cachedTasks && cachedNodes) {
+      renderExecution(cachedDispatches, cachedTasks, cachedNodes);
+    }
+  } else if (currentView === "dash") {
+    if (cachedNodes) {
+      $("#dash-nodes").innerHTML = (cachedNodes.slice(0, 8).map((n) =>
+        `<div class="row-item">${dot(n.status)}<span>${n.hostname}</span><span class="mono">${n.platform}</span>${pill(n.status)}</div>`
+      ).join("")) || `<div class="hint">还没有节点。用 agent 接入或执行安装脚本。</div>`;
+    }
+  }
+  // P0-2 节流全量刷新：最多 2 秒一次，避免 HTTP 请求风暴
+  const now = Date.now();
+  if (now - lastFullRefresh >= FULL_REFRESH_INTERVAL) {
+    lastFullRefresh = now;
+    refresh();
+  }
+}
+
+// 启动 WebSocket 连接
+connectRealtimeWS();

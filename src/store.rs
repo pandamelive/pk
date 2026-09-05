@@ -1,8 +1,8 @@
 use crate::config::PkConfig;
 use crate::models::*;
-use crate::torrent_index::TorrentIndexDb;
 use crate::service_registry::ServiceRegistry;
-use crate::ws::WsManager;
+use crate::torrent_index::TorrentIndexDb;
+use crate::ws::{FrontendWsManager, WsManager};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection};
@@ -17,6 +17,7 @@ pub struct AppState {
     pub artifacts_dir: PathBuf,
     pub ws_mgr: WsManager,
     pub service_registry: ServiceRegistry,
+    pub frontend_ws_mgr: FrontendWsManager,
     pub conn: Mutex<Connection>,
     pub torrent_index: Arc<TorrentIndexDb>,
 }
@@ -42,6 +43,48 @@ impl AppState {
         )?;
         create_tables(&conn)?;
 
+        // 数据库迁移：旧库添加节点能力参数字段
+        let _ = conn.execute("ALTER TABLE nodes ADD COLUMN max_concurrent INTEGER", []);
+        let _ = conn.execute("ALTER TABLE nodes ADD COLUMN max_bandwidth_bps INTEGER", []);
+        let _ = conn.execute("ALTER TABLE nodes ADD COLUMN capabilities TEXT", []);
+
+        // 重启时回收所有非终态 dispatch，避免节点崩溃后任务永远卡在 running/acked
+        let reclaimed = conn
+            .execute(
+                "UPDATE dispatches SET state='pending', node_id=NULL, claimed_at=NULL WHERE state IN ('acked','running')",
+                [],
+            )
+            .unwrap_or(0);
+        if reclaimed > 0 {
+            tracing::info!("启动时回收 {} 个卡住的 dispatch 到待下发池", reclaimed);
+        }
+
+        // 启动时清除所有内部节点（容器内spde，重建后旧节点必然失效）
+        // 内部节点通过 labels 包含 "internal=true" 标记
+        // 清除时先把 node_id 加入 deleted_nodes，防止 spde 用旧 node_id 重新注册时自动通过
+        let internal_ids: Vec<String> = conn
+            .prepare("SELECT id FROM nodes WHERE labels LIKE '%internal=true%'")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |r| r.get::<_, String>(0))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default();
+        for nid in &internal_ids {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO deleted_nodes (node_id, deleted_at) VALUES (?1, ?2)",
+                params![nid, Utc::now().to_rfc3339()],
+            );
+        }
+        let internal_cleared = conn
+            .execute("DELETE FROM nodes WHERE labels LIKE '%internal=true%'", [])
+            .unwrap_or(0);
+        if internal_cleared > 0 {
+            tracing::info!(
+                "启动时清除 {} 个旧内部节点并标记为已删除（容器重建后自动失效，需重新审批）",
+                internal_cleared
+            );
+        }
+
         // 从旧 state.json 导入数据
         let json_path = data_dir.join("state.json");
         if json_path.exists() {
@@ -57,6 +100,8 @@ impl AppState {
             TorrentIndexDb::open(data_dir.join("torrent_index.db"))
                 .context("open torrent_index db")?,
         );
+        // 首次启动：tasks 表为空时预置默认任务
+        seed_default_tasks(&conn)?;
 
         Ok(Arc::new(Self {
             cfg,
@@ -65,6 +110,7 @@ impl AppState {
             artifacts_dir,
             ws_mgr: WsManager::new(),
             service_registry: ServiceRegistry::new(),
+            frontend_ws_mgr: FrontendWsManager::new(),
             conn: Mutex::new(conn),
             torrent_index,
         }))
@@ -107,8 +153,16 @@ impl AppState {
         let now = Utc::now();
         let cutoff = (now - timeout).to_rfc3339();
         let conn = self.conn.lock().await;
+        // 双向同步：最近有心跳的 offline 节点设为 online，超时的设为 offline
+        // 注意：只改 offline 状态，不影响 pending（待审批）和 busy（忙碌）状态
         conn.execute(
-            "UPDATE nodes SET status = 'offline', active_tasks = 0 WHERE last_seen < ?1",
+            "UPDATE nodes SET status = 'online' WHERE last_seen >= ?1 AND status = 'offline'",
+            params![cutoff],
+        )
+        .ok();
+        // 超时的 online/busy → offline（pending 不自动改，保持待审批等用户操作）
+        conn.execute(
+            "UPDATE nodes SET status = 'offline', active_tasks = 0 WHERE last_seen < ?1 AND status IN ('online', 'busy')",
             params![cutoff],
         )
         .ok();
@@ -137,7 +191,16 @@ fn create_tables(conn: &Connection) -> Result<()> {
             labels TEXT,
             active_tasks INTEGER,
             bytes_downloaded INTEGER,
-            last_error TEXT
+            last_error TEXT,
+            max_concurrent INTEGER,
+            max_bandwidth_bps INTEGER,
+            capabilities TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS deleted_nodes (
+            node_id TEXT PRIMARY KEY,
+            deleted_at TEXT,
+            reason TEXT
         );
 
         CREATE TABLE IF NOT EXISTS tasks (
@@ -215,6 +278,43 @@ fn create_tables(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_wfr_workflow ON workflow_runs(workflow_id);
         "#,
     )?;
+    Ok(())
+}
+
+// ── 首次启动预置默认任务 ──────────────────────────────────
+
+fn seed_default_tasks(conn: &Connection) -> Result<()> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
+    if count > 0 {
+        return Ok(());
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let defaults = [
+        (
+            "iPhone 4.7 12.1.4 固件",
+            "http://updates-http.cdn-apple.com/2019WinterFCS/fullrestores/041-39257/32129B6C-292C-11E9-9E72-4511412B0A59/iPhone_4.7_12.1.4_16D57_Restore.ipsw",
+            "iPhone_4.7_12.1.4_16D57_Restore.ipsw",
+        ),
+        (
+            "iPhone 4S iOS 9.3.5 固件",
+            "http://appldnld.apple.com/iOS9.3.5/031-73068-20160825-6A2B99DE-6711-11E6-BB8F-133834D2D062/iPhone4,1_9.3.5_13G36_Restore.ipsw",
+            "iPhone4,1_9.3.5_13G36_Restore.ipsw",
+        ),
+        (
+            "iPhone iOS 15.3 固件",
+            "https://updates.cdn-apple.com/2022FCSWinter/fullrestores/002-57695/F64E2C74-C18B-48B3-8BC2-FF0DB4E21301/iPhone11,2,iPhone11,4,iPhone11,6,iPhone12,3,iPhone12,5_15.3_19D50_Restore.ipsw",
+            "iPhone11,2,iPhone11,4,iPhone11,6,iPhone12,3,iPhone12,5_15.3_19D50_Restore.ipsw",
+        ),
+    ];
+
+    for (name, url, filename) in defaults {
+        conn.execute(
+            "INSERT INTO tasks (id, name, url, filename, enable, created_at, note, overrides) VALUES (?1, ?2, ?3, ?4, 1, ?5, '', '{}')",
+            params![uuid::Uuid::new_v4().to_string(), name, url, filename, now],
+        )?;
+    }
+    tracing::info!("首次启动：已预置 {} 个默认下载任务", defaults.len());
     Ok(())
 }
 

@@ -1,16 +1,18 @@
-use crate::config::{PkConfig, SpdeDefaults};
-use crate::torrent_index::TorrentIndex;
+use crate::config::SpdeDefaults;
 use crate::models::*;
 use crate::scheduler;
+use crate::spde_cfg;
 use crate::store::{artifact_filename, detect_host_platform, AppState};
+use crate::torrent_index::TorrentIndex;
 use crate::workflow_scheduler;
 use crate::ws;
 use anyhow::Result;
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::Utc;
+use pandanetos::protocol::paths;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -19,47 +21,90 @@ use uuid::Uuid;
 
 // ── 通用响应 ──────────────────────────────────────────────
 
+/// 统一成功响应（对齐 api.md：code=0 成功，data 数据，message 提示）
 #[derive(Serialize)]
 pub struct ApiResponse<T: Serialize> {
-    pub success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 业务状态码，0 表示成功
+    pub code: i32,
+    /// 响应数据
     pub data: Option<T>,
+    /// 提示信息
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub message: Option<String>,
 }
 
 impl<T: Serialize> ApiResponse<T> {
+    /// 成功响应：{code:0, data, message:"ok"}
     pub fn ok(data: T) -> Self {
         Self {
-            success: true,
+            code: 0,
             data: Some(data),
-            error: None,
+            message: Some("ok".to_string()),
         }
     }
-    pub fn err(msg: impl Into<String>) -> Self {
+    /// 成功响应（无数据体）：{code:0, message:"ok"}
+    pub fn ok_empty() -> Self {
         Self {
-            success: false,
+            code: 0,
             data: None,
-            error: Some(msg.into()),
+            message: Some("ok".to_string()),
         }
+    }
+}
+
+/// 统一错误响应（对齐 api.md：错误码 + message + details，HTTP 状态由错误码映射）
+#[derive(Serialize)]
+pub struct ApiErrorResp {
+    /// 错误码（{DOMAIN}_{REASON}）
+    pub code: String,
+    /// 错误信息
+    pub message: String,
+    /// 错误详情（可选）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+impl ApiErrorResp {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            details: None,
+        }
+    }
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+    /// 根据错误码映射 HTTP 状态码（error-codes.md）
+    pub fn http_status(&self) -> u16 {
+        pandanetos::error::error_code_http_status(self.code.as_str())
     }
 }
 
 pub type ApiResult<T> = Result<Json<ApiResponse<T>>, AppError>;
 
-pub struct AppError(anyhow::Error);
+/// 应用错误（任何错误都携带标准错误码）
+pub struct AppError(ApiErrorResp);
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::<()>::err(self.0.to_string())),
-        )
-            .into_response()
+        let status = self.0.http_status();
+        let status = axum::http::StatusCode::from_u16(status)
+            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        (status, Json(self.0)).into_response()
     }
 }
-impl<E: Into<anyhow::Error>> From<E> for AppError {
-    fn from(e: E) -> Self {
-        Self(e.into())
+impl From<ApiErrorResp> for AppError {
+    fn from(e: ApiErrorResp) -> Self {
+        Self(e)
+    }
+}
+impl From<anyhow::Error> for AppError {
+    fn from(e: anyhow::Error) -> Self {
+        Self(ApiErrorResp::new(
+            pandanetos::error::codes::INTERNAL_ERROR,
+            e.to_string(),
+        ))
     }
 }
 
@@ -70,7 +115,10 @@ pub fn check_auth(state: &AppState, token: Option<&str>) -> Result<(), AppError>
         match token {
             Some(t) if t == state.cfg.token => {}
             _ => {
-                return Err(AppError(anyhow::anyhow!("未授权")));
+                return Err(AppError(ApiErrorResp::new(
+                    pandanetos::error::codes::UNAUTHORIZED,
+                    "未授权",
+                )));
             }
         }
     }
@@ -80,9 +128,9 @@ pub fn check_auth(state: &AppState, token: Option<&str>) -> Result<(), AppError>
 // ── 节点管理 ──────────────────────────────────────────────
 
 pub async fn list_nodes(State(state): State<Arc<AppState>>) -> ApiResult<Vec<Node>> {
-    let nodes = state
+    let mut nodes = state
         .with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT id, hostname, platform, arch, version, status, last_seen, registered_at, labels, active_tasks, bytes_downloaded, last_error FROM nodes ORDER BY registered_at DESC")?;
+            let mut stmt = conn.prepare("SELECT id, hostname, platform, arch, version, status, last_seen, registered_at, labels, active_tasks, bytes_downloaded, last_error, max_concurrent, max_bandwidth_bps, capabilities FROM nodes ORDER BY registered_at DESC")?;
             let nodes: Vec<Node> = stmt
                 .query_map([], |r| {
                     let labels_str: String = r.get(8)?;
@@ -92,13 +140,26 @@ pub async fn list_nodes(State(state): State<Arc<AppState>>) -> ApiResult<Vec<Nod
                         platform: r.get(2)?,
                         arch: r.get(3)?,
                         version: r.get(4)?,
-                        status: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or(NodeStatus::Offline),
+                        status: match r.get::<_, String>(5)?.as_str() {
+                            "online" => NodeStatus::Online,
+                            "busy" => NodeStatus::Busy,
+                            "pending" => NodeStatus::Pending,
+                            _ => NodeStatus::Offline,
+                        },
                         last_seen: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(6)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
                         registered_at: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(7)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
                         labels: serde_json::from_str(&labels_str).unwrap_or_default(),
                         active_tasks: r.get(9)?,
                         bytes_downloaded: r.get(10)?,
                         last_error: r.get(11)?,
+                        max_concurrent: r.get(12)?,
+                        max_bandwidth_bps: r.get(13)?,
+                        capabilities: {
+                            let cap_str: Option<String> = r.get(14).ok();
+                            cap_str.and_then(|s| serde_json::from_str(&s).ok())
+                        },
+                        total_speed_bps: 0,
+                        active_tasks_progress: Vec::new(),
                     })
                 })?
                 .filter_map(|r| r.ok())
@@ -106,19 +167,206 @@ pub async fn list_nodes(State(state): State<Arc<AppState>>) -> ApiResult<Vec<Nod
             Ok(nodes)
         })
         .await?;
+
+    // 从内存态填充实时状态
+    let realtime_map = state.ws_mgr.get_all_realtime().await;
+    for node in &mut nodes {
+        if let Some(rt) = realtime_map.get(&node.id) {
+            node.total_speed_bps = rt.total_speed_bps;
+            node.active_tasks_progress = rt.active_tasks.clone();
+        }
+    }
+
     Ok(Json(ApiResponse::ok(nodes)))
+}
+
+/// 查询单个节点实时状态
+pub async fn get_node_realtime(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<crate::ws::NodeRealtime> {
+    let rt = state.ws_mgr.get_node_realtime(id).await.unwrap_or_default();
+    Ok(Json(ApiResponse::ok(rt)))
 }
 
 pub async fn delete_node(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<()> {
+    let now = Utc::now().to_rfc3339();
     state
         .with_transaction(|conn| {
+            // 记录到 deleted_nodes，该节点再次注册时需要审批
+            conn.execute(
+                "INSERT OR REPLACE INTO deleted_nodes (node_id, deleted_at, reason) VALUES (?1, ?2, 'manual_delete')",
+                params![id.to_string(), now],
+            )?;
             conn.execute("DELETE FROM nodes WHERE id = ?1", params![id.to_string()])?;
             Ok(())
         })
         .await?;
+    // 主动通知 spde 节点已被删除，使其立即暂停任务并重新注册
+    state
+        .ws_mgr
+        .send_to_node(id, &crate::ws::ServerMsg::NodeDeleted)
+        .await;
+    state.frontend_ws_mgr.notify_update();
+    Ok(Json(ApiResponse::ok(())))
+}
+
+/// 批量清理离线节点（DELETE /api/v1/nodes）
+pub async fn purge_offline_nodes(State(state): State<Arc<AppState>>) -> ApiResult<u64> {
+    let now = Utc::now().to_rfc3339();
+    let deleted = state
+        .with_transaction(|conn| {
+            // 先查出所有 offline 节点的 id，记录到 deleted_nodes
+            let offline_ids: Vec<String> = conn
+                .prepare("SELECT id FROM nodes WHERE status = 'offline'")?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            for nid in &offline_ids {
+                conn.execute(
+                    "INSERT OR REPLACE INTO deleted_nodes (node_id, deleted_at, reason) VALUES (?1, ?2, 'purge_offline')",
+                    params![nid, now],
+                )?;
+            }
+            let n = conn.execute("DELETE FROM nodes WHERE status = 'offline'", [])?;
+            Ok((n as u64, offline_ids))
+        })
+        .await?;
+    let (deleted, offline_ids) = deleted;
+    // 主动通知所有被删的离线节点（如果还连着的话）
+    for nid_str in &offline_ids {
+        if let Ok(nid) = uuid::Uuid::parse_str(nid_str) {
+            state
+                .ws_mgr
+                .send_to_node(nid, &crate::ws::ServerMsg::NodeDeleted)
+                .await;
+        }
+    }
+    state.frontend_ws_mgr.notify_update();
+    Ok(Json(ApiResponse::ok(deleted)))
+}
+
+// ── 节点能力参数管理 ──────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateNodeCapabilitiesReq {
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
+    #[serde(default)]
+    pub max_bandwidth_bps: Option<u64>,
+    /// 通用能力参数合并（pk 不认识的字段透传，不做解析）
+    #[serde(default)]
+    pub capabilities: Option<serde_json::Value>,
+}
+
+/// 修改节点能力参数（合并模式：pk 只改认识的字段，其他保留 spde 原值）
+pub async fn update_node_capabilities(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateNodeCapabilitiesReq>,
+) -> ApiResult<()> {
+    state
+        .with_transaction(|conn| {
+            // 读取节点当前的 capabilities（spde 上报的原始能力）
+            let current_cap_str: Option<String> = conn
+                .query_row("SELECT capabilities FROM nodes WHERE id = ?1", params![id.to_string()], |r| r.get(0))
+                .ok();
+            let mut current_cap: serde_json::Value = current_cap_str
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(serde_json::json!({}));
+
+            // 合并模式：pk 认识的字段覆盖，其他保留
+            if let Some(obj) = current_cap.as_object_mut() {
+                if let Some(mc) = req.max_concurrent {
+                    obj.insert("max_concurrent".to_string(), serde_json::json!(mc));
+                }
+                if let Some(mb) = req.max_bandwidth_bps {
+                    obj.insert("max_bandwidth_bps".to_string(), serde_json::json!(mb));
+                }
+                // 合并通用 capabilities（pk 不认识的字段透传）
+                if let Some(extra) = &req.capabilities {
+                    if let Some(extra_obj) = extra.as_object() {
+                        for (k, v) in extra_obj {
+                            obj.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+
+            // 更新数据库：独立字段 + 合并后的 capabilities JSON
+            conn.execute(
+                "UPDATE nodes SET max_concurrent=?1, max_bandwidth_bps=?2, capabilities=?3 WHERE id=?4",
+                params![
+                    req.max_concurrent,
+                    req.max_bandwidth_bps,
+                    current_cap.to_string(),
+                    id.to_string()
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+    state.frontend_ws_mgr.notify_update();
+    Ok(Json(ApiResponse::ok(())))
+}
+
+// ── 节点审批（删除后再次注册需人工同意） ──────────────────
+
+/// 同意待审批节点
+pub async fn approve_node(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<()> {
+    state
+        .with_transaction(|conn| {
+            // 状态改为 online
+            conn.execute(
+                "UPDATE nodes SET status='online' WHERE id = ?1 AND status='pending'",
+                params![id.to_string()],
+            )?;
+            // 从 deleted_nodes 移除，以后重启不再标记为 pending
+            conn.execute(
+                "DELETE FROM deleted_nodes WHERE node_id = ?1",
+                params![id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await?;
+    state.frontend_ws_mgr.notify_update();
+    Ok(Json(ApiResponse::ok(())))
+}
+
+/// 拒绝待审批节点
+pub async fn reject_node(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<()> {
+    state
+        .with_transaction(|conn| {
+            // 拒绝不删除节点，保持 pending 状态，用户可随时再点同意
+            // 在 labels 中添加 rejected 标记，便于前端识别
+            let labels_str: String = conn
+                .query_row(
+                    "SELECT labels FROM nodes WHERE id = ?1",
+                    params![id.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap_or_else(|_| "[]".to_string());
+            let mut labels: Vec<String> = serde_json::from_str(&labels_str).unwrap_or_default();
+            if !labels.iter().any(|l| l == "rejected") {
+                labels.push("rejected".to_string());
+            }
+            conn.execute(
+                "UPDATE nodes SET labels=?1 WHERE id=?2 AND status='pending'",
+                params![serde_json::to_string(&labels)?, id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await?;
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(())))
 }
 
@@ -182,6 +430,7 @@ pub async fn create_task(
             Ok(())
         })
         .await?;
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(task)))
 }
 
@@ -230,6 +479,7 @@ pub async fn update_task(
             Ok(task)
         })
         .await?;
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(task)))
 }
 
@@ -244,6 +494,22 @@ pub async fn delete_task(
             Ok(())
         })
         .await?;
+    state.frontend_ws_mgr.notify_update();
+    Ok(Json(ApiResponse::ok(())))
+}
+
+/// 取消任务（不删除任务记录，仅将 pending/running 状态的 dispatch 标记为 cancelled）
+pub async fn cancel_task_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<()> {
+    state
+        .with_transaction(|conn| {
+            scheduler::cancel_task(conn, id)?;
+            Ok(())
+        })
+        .await?;
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(())))
 }
 
@@ -267,17 +533,13 @@ pub async fn list_runs(
     let runs = state
         .with_conn(|conn| {
             let runs: Vec<RunRecord> = if let Some(nid) = q.node_id {
-                let mut stmt = conn.prepare(
-                    "SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, file_size, downloaded_bytes, elapsed_secs, avg_speed_mbps, status, success_chunks, failed_chunks, error_msg, timestamp FROM runs WHERE node_id = ?1 ORDER BY timestamp DESC LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(params![nid.to_string(), q.limit], map_run)?;
-                rows.filter_map(|r| r.ok()).collect()
+                let mut stmt = conn.prepare("SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, file_size, downloaded_bytes, elapsed_secs, avg_speed_mbps, status, success_chunks, failed_chunks, error_msg, timestamp FROM runs WHERE node_id = ?1 ORDER BY timestamp DESC LIMIT ?2")?;
+                let rows: Vec<RunRecord> = stmt.query_map(params![nid.to_string(), q.limit], map_run)?.filter_map(|r| r.ok()).collect();
+                rows
             } else {
-                let mut stmt = conn.prepare(
-                    "SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, file_size, downloaded_bytes, elapsed_secs, avg_speed_mbps, status, success_chunks, failed_chunks, error_msg, timestamp FROM runs ORDER BY timestamp DESC LIMIT ?1",
-                )?;
-                let rows = stmt.query_map(params![q.limit], map_run)?;
-                rows.filter_map(|r| r.ok()).collect()
+                let mut stmt = conn.prepare("SELECT id, task_id, dispatch_id, node_id, task_name, url, filename, file_size, downloaded_bytes, elapsed_secs, avg_speed_mbps, status, success_chunks, failed_chunks, error_msg, timestamp FROM runs ORDER BY timestamp DESC LIMIT ?1")?;
+                let rows: Vec<RunRecord> = stmt.query_map(params![q.limit], map_run)?.filter_map(|r| r.ok()).collect();
+                rows
             };
             Ok(runs)
         })
@@ -313,41 +575,161 @@ fn map_run(r: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
 
 pub async fn get_overview(State(state): State<Arc<AppState>>) -> ApiResult<Overview> {
     state.refresh_online().await;
-    let ov = state.with_conn(|conn| scheduler::overview(conn)).await?;
+    let ov = state.with_conn(scheduler::overview).await?;
     Ok(Json(ApiResponse::ok(ov)))
+}
+
+/// 版本信息接口（pcdn-keeper 场景下返回 pk + spde 组合版本）
+#[derive(Debug, Serialize)]
+pub struct VersionInfo {
+    pub pk_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spde_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pcdn_keeper_version: Option<String>,
+}
+
+pub async fn get_version() -> ApiResult<VersionInfo> {
+    let info = VersionInfo {
+        pk_version: env!("CARGO_PKG_VERSION").to_string(),
+        spde_version: std::env::var("SPDE_VERSION").ok(),
+        pcdn_keeper_version: std::env::var("PCDN_KEEPER_VERSION").ok(),
+    };
+    Ok(Json(ApiResponse::ok(info)))
 }
 
 pub async fn get_defaults(State(state): State<Arc<AppState>>) -> ApiResult<SpdeDefaults> {
     Ok(Json(ApiResponse::ok(state.cfg.spde_defaults.clone())))
 }
 
+/// 节点拉取 YAML 格式配置（SPDE 节点调用）
+pub async fn get_node_config_yaml(
+    State(state): State<Arc<AppState>>,
+    Path(node_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let master_url = format!("http://{}", state.cfg.listen);
+    let heartbeat_interval = state.cfg.heartbeat_timeout_secs / 3;
+    let yaml = spde_cfg::render_config(
+        &state.cfg.spde_defaults,
+        &[],
+        &master_url,
+        node_id,
+        heartbeat_interval,
+    );
+    ([("content-type", "application/yaml; charset=utf-8")], yaml).into_response()
+}
+
 // ── Agent 接口（节点调用） ────────────────────────────────
+
+/// 判断是否为内部地址（本地回环或内网IP）
+fn is_internal_addr(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+    }
+}
+
+pub async fn agent_register(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    Json(mut req): Json<AgentRegisterReq>,
+) -> ApiResult<AgentRegisterResp> {
+    let node_id = req.node_id.unwrap_or_else(Uuid::new_v4);
+    let now = Utc::now();
+
+    // 自动标记内部节点：本地回环或内网IP连接的agent
+    if is_internal_addr(&addr.ip()) && !req.labels.iter().any(|l| l == "internal=true") {
+        req.labels.push("internal=true".to_string());
+    }
+    let node_status: String = state
+        .with_transaction(|conn| {
+            // 检查该节点是否被删除过（删除过的节点再次注册需要审批）
+            let was_deleted: bool = conn
+                .query_row("SELECT COUNT(*) FROM deleted_nodes WHERE node_id = ?1", params![node_id.to_string()], |r| r.get::<_, i64>(0))
+                .map(|c| c > 0)
+                .unwrap_or(false);
+
+            let exists: bool = conn
+                .query_row("SELECT COUNT(*) FROM nodes WHERE id = ?1", params![node_id.to_string()], |r| r.get::<_, i64>(0))
+                .map(|c| c > 0)
+                .unwrap_or(false);
+
+            if exists {
+                // 已存在的节点：pending/busy 状态保持不变，其他更新为 online
+                let current_status: String = conn
+                    .query_row("SELECT status FROM nodes WHERE id = ?1", params![node_id.to_string()], |r| r.get(0))
+                    .unwrap_or_else(|_| "online".to_string());
+                let new_status = match current_status.as_str() {
+                    "pending" | "busy" => current_status.as_str(),
+                    _ => "online",
+                };
+                conn.execute(
+                    "UPDATE nodes SET hostname=?1, platform=?2, arch=?3, version=?4, status=?5, last_seen=?6, labels=?7, max_concurrent=?8, max_bandwidth_bps=?9, capabilities=?10 WHERE id=?11",
+                    params![req.hostname, req.platform, req.arch, req.version, new_status, now.to_rfc3339(), serde_json::to_string(&req.labels)?, req.max_concurrent, req.max_bandwidth_bps, req.capabilities.as_ref().map(|v| v.to_string()), node_id.to_string()],
+                )?;
+                Ok(new_status.to_string())
+            } else {
+                // 新节点：被删过的状态为 pending（待审批），否则为 online（自动通过）
+                let init_status = if was_deleted { "pending" } else { "online" };
+                conn.execute(
+                    "INSERT INTO nodes VALUES (?1,?2,?3,?4,?5,?6,?7,?7,?8,0,0,NULL,?9,?10,?11)",
+                    params![node_id.to_string(), req.hostname, req.platform, req.arch, req.version, init_status, now.to_rfc3339(), serde_json::to_string(&req.labels)?, req.max_concurrent, req.max_bandwidth_bps, req.capabilities.as_ref().map(|v| v.to_string())],
+                )?;
+                if was_deleted {
+                    tracing::info!("节点 {} 曾被删除，再次注册标记为 pending 待审批", node_id);
+                }
+                Ok(init_status.to_string())
+            }
+        })
+        .await?;
+
+    state.frontend_ws_mgr.notify_update();
+    Ok(Json(ApiResponse::ok(AgentRegisterResp {
+        node_id,
+        poll_interval_secs: state.cfg.heartbeat_timeout_secs / 2,
+        master_listen: state.cfg.listen.clone(),
+        status: node_status,
+    })))
+}
 
 pub async fn agent_heartbeat(
     State(state): State<Arc<AppState>>,
+    Path(node_id): Path<Uuid>,
     Json(req): Json<AgentHeartbeatReq>,
 ) -> ApiResult<()> {
     let now = Utc::now();
     state
         .with_transaction(|conn| {
+            // 节点不存在时直接忽略（被删除的节点不会通过心跳自动恢复，必须重新 register）
             let exists: bool = conn
-                .query_row("SELECT COUNT(*) FROM nodes WHERE id = ?1", params![req.node_id.to_string()], |r| r.get::<_, i64>(0))
+                .query_row("SELECT COUNT(*) FROM nodes WHERE id = ?1", params![node_id.to_string()], |r| r.get::<_, i64>(0))
                 .map(|c| c > 0)
                 .unwrap_or(false);
-            if exists {
+            if !exists {
+                return Ok(());
+            }
+            // 查询节点当前状态和自定义的最大并发数
+            let (current_status, node_max_concurrent): (String, Option<u32>) = conn
+                .query_row("SELECT status, max_concurrent FROM nodes WHERE id = ?1", params![node_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap_or_else(|_| ("online".to_string(), None));
+            if current_status == "pending" {
                 conn.execute(
-                    "UPDATE nodes SET status='online', last_seen=?1, active_tasks=?2, bytes_downloaded=?3 WHERE id=?4",
-                    params![now.to_rfc3339(), req.active_tasks, req.bytes_downloaded, req.node_id.to_string()],
+                    "UPDATE nodes SET last_seen=?1, active_tasks=?2, bytes_downloaded=?3 WHERE id=?4",
+                    params![now.to_rfc3339(), req.active_tasks, req.bytes_downloaded, node_id.to_string()],
                 )?;
             } else {
+                // 优先用节点自定义的最大并发数，否则用全局默认
+                let max_concurrent = node_max_concurrent.unwrap_or(state.cfg.spde_defaults.max_concurrent);
+                let new_status = if req.active_tasks >= max_concurrent { "busy" } else { "online" };
                 conn.execute(
-                    "INSERT INTO nodes VALUES (?1,'unknown','unknown','unknown','unknown','online',?2,?2,'[]',?3,?4,NULL)",
-                    params![req.node_id.to_string(), now.to_rfc3339(), req.active_tasks, req.bytes_downloaded],
+                    "UPDATE nodes SET status=?1, last_seen=?2, active_tasks=?3, bytes_downloaded=?4 WHERE id=?5",
+                    params![new_status, now.to_rfc3339(), req.active_tasks, req.bytes_downloaded, node_id.to_string()],
                 )?;
             }
             Ok(())
         })
         .await?;
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(())))
 }
 
@@ -358,16 +740,35 @@ pub async fn agent_fetch_config(
     let now = Utc::now();
     state
         .with_transaction(|conn| {
+            // 节点不存在时直接忽略（不自动创建，必须通过 register 注册）
             let exists: bool = conn
-                .query_row("SELECT COUNT(*) FROM nodes WHERE id = ?1", params![req.node_id.to_string()], |r| r.get::<_, i64>(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM nodes WHERE id = ?1",
+                    params![req.node_id.to_string()],
+                    |r| r.get::<_, i64>(0),
+                )
                 .map(|c| c > 0)
                 .unwrap_or(false);
-            if exists {
-                conn.execute("UPDATE nodes SET status='online', last_seen=?1 WHERE id=?2", params![now.to_rfc3339(), req.node_id.to_string()])?;
+            if !exists {
+                return Ok(());
+            }
+            // pending/busy 状态的节点保持不变，只更新 last_seen，不改为 online
+            let current_status: String = conn
+                .query_row(
+                    "SELECT status FROM nodes WHERE id = ?1",
+                    params![req.node_id.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap_or_else(|_| "online".to_string());
+            if current_status == "pending" || current_status == "busy" {
+                conn.execute(
+                    "UPDATE nodes SET last_seen=?1 WHERE id=?2",
+                    params![now.to_rfc3339(), req.node_id.to_string()],
+                )?;
             } else {
                 conn.execute(
-                    "INSERT INTO nodes VALUES (?1,?2,'unknown','unknown','unknown','online',?3,?3,'[]',0,0,NULL)",
-                    params![req.node_id.to_string(), req.hostname.clone().unwrap_or_else(|| "unknown".into()), now.to_rfc3339()],
+                    "UPDATE nodes SET status='online', last_seen=?1 WHERE id=?2",
+                    params![now.to_rfc3339(), req.node_id.to_string()],
                 )?;
             }
             Ok(())
@@ -379,7 +780,7 @@ pub async fn agent_fetch_config(
         dispatch_id: Uuid::nil(),
         master: format!(
             "http://127.0.0.1:{}",
-            state.cfg.listen.split(':').last().unwrap_or("5566")
+            state.cfg.listen.split(':').next_back().unwrap_or("5566")
         ),
         token: if state.cfg.token.is_empty() {
             None
@@ -388,6 +789,7 @@ pub async fn agent_fetch_config(
         },
         tasks: vec![],
     };
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(cfg)))
 }
 
@@ -398,6 +800,7 @@ pub async fn agent_report(
     let rec = state
         .with_transaction(|conn| scheduler::apply_report(conn, &req))
         .await?;
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(rec)))
 }
 
@@ -412,18 +815,25 @@ pub async fn agent_claim(
 
     match result {
         Ok(Some(node_task)) => {
-            let cfg = ws::build_node_task_config(&state, &node_task);
-            (StatusCode::OK, Json(ApiResponse::ok(cfg))).into_response()
+            let resp = ClaimTaskResp {
+                dispatch_id: node_task.dispatch_id,
+                task_id: node_task.task.id,
+                name: node_task.task.name,
+                url: node_task.task.url,
+                filename: node_task.task.filename,
+                overrides: node_task.task.overrides,
+            };
+            state.frontend_ws_mgr.notify_update();
+            (StatusCode::OK, Json(ApiResponse::ok(resp))).into_response()
         }
         Ok(None) => {
             // 池子空，返回 204
             (StatusCode::NO_CONTENT, Json(ApiResponse::<()>::ok(()))).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::<()>::err(e.to_string())),
-        )
-            .into_response(),
+        Err(e) => {
+            let resp = ApiErrorResp::new(pandanetos::error::codes::INTERNAL_ERROR, e.to_string());
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(resp)).into_response()
+        }
     }
 }
 
@@ -452,7 +862,11 @@ fn map_workflow(r: &rusqlite::Row) -> rusqlite::Result<Workflow> {
         schedule: serde_json::from_str(&schedule_str)
             .unwrap_or(WorkflowSchedule::Once { at: Utc::now() }),
         task_ids: serde_json::from_str(&task_ids_str).unwrap_or_default(),
-        target: serde_json::from_str(&target_str).unwrap_or_default(),
+        target: match target_str.as_str() {
+            "all" => AssignmentTarget::All,
+            "nodes" => AssignmentTarget::Nodes,
+            _ => AssignmentTarget::Any,
+        },
         node_ids: serde_json::from_str(&node_ids_str).unwrap_or_default(),
         next_run_at: r.get::<_, Option<String>>(7)?.and_then(|s| {
             chrono::DateTime::parse_from_rfc3339(&s)
@@ -512,6 +926,7 @@ pub async fn create_workflow(
             Ok(())
         })
         .await?;
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(wf)))
 }
 
@@ -552,6 +967,7 @@ pub async fn update_workflow(
             Ok(wf)
         })
         .await?;
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(wf)))
 }
 
@@ -572,6 +988,7 @@ pub async fn delete_workflow(
             Ok(())
         })
         .await?;
+    state.frontend_ws_mgr.notify_update();
     Ok(Json(ApiResponse::ok(())))
 }
 
@@ -588,7 +1005,10 @@ pub async fn get_workflow(
         })
         .await?;
     let Some(wf) = wf else {
-        return Err(AppError(anyhow::anyhow!("工作流不存在")));
+        return Err(AppError(ApiErrorResp::new(
+            pandanetos::error::codes::WORKFLOW_NOT_FOUND,
+            "工作流不存在",
+        )));
     };
 
     let runs = state
@@ -626,9 +1046,13 @@ pub async fn trigger_workflow_handler(
     Path(id): Path<Uuid>,
 ) -> ApiResult<WorkflowRun> {
     let run = workflow_scheduler::trigger_workflow(&state, id).await?;
+    state.frontend_ws_mgr.notify_update();
     match run {
         Some(r) => Ok(Json(ApiResponse::ok(r))),
-        None => Err(AppError(anyhow::anyhow!("工作流不存在"))),
+        None => Err(AppError(ApiErrorResp::new(
+            pandanetos::error::codes::WORKFLOW_NOT_FOUND,
+            "工作流不存在",
+        ))),
     }
 }
 
@@ -657,11 +1081,22 @@ pub async fn list_dispatches(State(state): State<Arc<AppState>>) -> ApiResult<Ve
                         id: r.get::<_, String>(0)?.parse().unwrap(),
                         task_id: r.get::<_, String>(1)?.parse().unwrap(),
                         node_id: r.get::<_, Option<String>>(2)?.and_then(|s| s.parse().ok()),
-                        state: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or(DispatchState::Pending),
+                        state: match r.get::<_, String>(3)?.as_str() {
+                            "acked" => DispatchState::Acked,
+                            "running" => DispatchState::Running,
+                            "success" => DispatchState::Success,
+                            "failed" => DispatchState::Failed,
+                            "cancelled" => DispatchState::Cancelled,
+                            _ => DispatchState::Pending,
+                        },
                         created_at: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(4)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
                         updated_at: chrono::DateTime::parse_from_rfc3339(&r.get::<_, String>(5)?).ok().map(|dt| dt.with_timezone(&Utc)).unwrap_or(Utc::now()),
                         claimed_at: r.get::<_, Option<String>>(6)?.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))),
-                        target: serde_json::from_str(&target_str).unwrap_or_default(),
+                        target: match target_str.as_str() {
+                            "all" => AssignmentTarget::All,
+                            "nodes" => AssignmentTarget::Nodes,
+                            _ => AssignmentTarget::Any,
+                        },
                         allowed_nodes: serde_json::from_str(&allowed_str).unwrap_or_default(),
                     })
                 })?
@@ -673,9 +1108,9 @@ pub async fn list_dispatches(State(state): State<Arc<AppState>>) -> ApiResult<Ve
     Ok(Json(ApiResponse::ok(dispatches)))
 }
 
-// ── 静态文件 / 二进制分发 ─────────────────────────────────
+// ── 二进制分发 ─────────────────────────────────
 
-pub async fn serve_web(State(state): State<Arc<AppState>>, Path(path): Path<String>) -> Response {
+pub async fn serve_web(State(_state): State<Arc<AppState>>, Path(path): Path<String>) -> Response {
     let safe_path = if path.is_empty() {
         "index.html".into()
     } else {
@@ -703,6 +1138,48 @@ pub async fn serve_web(State(state): State<Arc<AppState>>, Path(path): Path<Stri
     } else {
         (StatusCode::NOT_FOUND, "Not Found").into_response()
     }
+}
+
+#[derive(Serialize)]
+pub struct ArtifactInfo {
+    pub platform: String,
+    pub filename: String,
+    pub present: bool,
+    pub size: u64,
+}
+
+pub async fn list_artifacts(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<Vec<ArtifactInfo>>> {
+    let platforms = [
+        "windows-x86_64",
+        "linux-x86_64",
+        "linux-aarch64",
+        "macos-x86_64",
+        "macos-aarch64",
+    ];
+    let mut artifacts = Vec::new();
+    for platform in platforms {
+        if let Some(filename) = artifact_filename(platform) {
+            let file_path = state.artifacts_dir.join(filename);
+            let (present, size) = if file_path.exists() {
+                let size = tokio::fs::metadata(&file_path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                (true, size)
+            } else {
+                (false, 0)
+            };
+            artifacts.push(ArtifactInfo {
+                platform: platform.to_string(),
+                filename: filename.to_string(),
+                present,
+                size,
+            });
+        }
+    }
+    Json(ApiResponse::ok(artifacts))
 }
 
 pub async fn serve_artifact(
@@ -769,7 +1246,10 @@ pub async fn get_service(
 ) -> ApiResult<ServiceAgentInfo> {
     match state.service_registry.get(id).await {
         Some(info) => Ok(Json(ApiResponse::ok(info))),
-        None => Err(AppError(anyhow::anyhow!("服务不存在"))),
+        None => Err(AppError(ApiErrorResp::new(
+            pandanetos::error::codes::NOT_FOUND,
+            "服务不存在".to_string(),
+        ))),
     }
 }
 
@@ -832,28 +1312,33 @@ pub async fn register_service(
         node_id,
         poll_interval_secs: state.cfg.heartbeat_timeout_secs,
         master_listen: state.cfg.listen.clone(),
+        status: "online".to_string(),
     })))
 }
 
 // ── 路由 ──────────────────────────────────────────────────
-
-pub async fn serve_web_root(State(state): State<Arc<AppState>>) -> Response {
-    serve_web(State(state), Path("".into())).await
-}
 
 pub fn router(state: Arc<AppState>) -> axum::Router {
     use axum::routing::{delete, get, post, put};
     axum::Router::new()
         // 总览
         .route("/api/v1/overview", get(get_overview))
+        .route("/api/v1/version", get(get_version))
         .route("/api/v1/defaults", get(get_defaults))
         .route("/api/v1/host-info", get(host_info))
         // 节点
-        .route("/api/v1/nodes", get(list_nodes))
+        .route(paths::NODES, get(list_nodes))
+        .route(paths::NODES_OFFLINE, delete(purge_offline_nodes))
         .route("/api/v1/nodes/{id}", delete(delete_node))
+        .route("/api/v1/nodes/{id}/approve", post(approve_node))
+        .route(paths::NODE_CAPABILITIES, put(update_node_capabilities))
+        .route("/api/v1/nodes/{id}/reject", post(reject_node))
+        .route("/api/v1/nodes/{id}/config.yaml", get(get_node_config_yaml))
+        .route("/api/v1/nodes/{id}/realtime", get(get_node_realtime))
         // 任务
-        .route("/api/v1/tasks", get(list_tasks).post(create_task))
-        .route("/api/v1/tasks/{id}", put(update_task).delete(delete_task))
+        .route(paths::TASKS, get(list_tasks).post(create_task))
+        .route(paths::TASK_DETAIL, put(update_task).delete(delete_task))
+        .route("/api/v1/tasks/{id}/cancel", post(cancel_task_handler))
         // 运行记录
         .route("/api/v1/runs", get(list_runs))
         // 下发记录
@@ -875,14 +1360,15 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         )
         .route("/api/v1/workflow-runs", get(list_workflow_runs))
         // Agent
-        .route("/api/v1/agent/heartbeat", post(agent_heartbeat))
+        .route(paths::AGENT_REGISTER, post(agent_register))
+        .route(paths::NODE_HEARTBEAT, post(agent_heartbeat))
         .route("/api/v1/agent/config", post(agent_fetch_config))
         .route("/api/v1/agent/report", post(agent_report))
-        .route("/api/v1/agent/claim", post(agent_claim))
-        .route("/api/v1/agent/register", post(register_service))
+        .route(paths::DISPATCH_CLAIM, post(agent_claim))
         // 服务注册与发现
-        .route("/api/v1/agents", get(list_services))
-        .route("/api/v1/agents/{id}", get(get_service))
+        .route(paths::AGENTS, get(list_services))
+        .route(paths::AGENT_DETAIL, get(get_service))
+        .route("/api/v1/services/register", post(register_service))
         // 监控
         .route("/api/v1/metrics", get(pk_metrics))
         // 种子索引
@@ -890,20 +1376,21 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api/v1/torrents/top", get(top_torrents))
         .route("/api/v1/torrents/recent", get(recent_torrents))
         .route("/api/v1/torrents/stats", get(torrent_stats))
-        .route("/api/v1/torrents/{infohash}", get(get_torrent).delete(delete_torrent))
+        .route(
+            "/api/v1/torrents/{infohash}",
+            get(get_torrent).delete(delete_torrent),
+        )
         .route("/api/v1/torrents/{infohash}/files", get(torrent_files))
         // WebSocket
-        .route("/ws", get(ws::ws_handler))
+        .route("/api/v1/agent/ws", get(ws::ws_handler))
+        .route("/api/v1/realtime/ws", get(ws::frontend_ws_handler))
         // 二进制分发
+        .route("/api/v1/artifacts", get(list_artifacts))
         .route("/api/v1/artifacts/{platform}", get(serve_artifact))
-        // 静态文件（兜底）
-        .route("/", get(serve_web_root))
-        .route("/{path}", get(serve_web))
         .with_state(state)
 }
 
 // ─── 种子索引 API ───
-
 
 #[derive(Debug, Deserialize)]
 struct TorrentQuery {

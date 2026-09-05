@@ -52,6 +52,10 @@ nav { display: flex; flex-direction: column; gap: 6px; }
 .nav.on, .nav:hover { background: #1a2b24; color: var(--ink); }
 .rail-foot { margin-top: auto; }
 .rail-foot label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+.rail-version {
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
+  font-size: 10px; color: var(--muted); line-height: 1.5; word-break: break-all;
+}
 input, select, button, textarea {
   font: inherit; color: var(--ink);
   background: #0e1614; border: 1px solid var(--line); border-radius: 8px;
@@ -87,6 +91,7 @@ main { flex: 1; overflow: auto; padding: 28px 32px 48px; }
 .online { background: var(--accent); }
 .offline { background: #44554c; }
 .busy { background: var(--busy); }
+.pending { background: var(--warn); }
 .pill { font-size: 11px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
 .ok { color: var(--accent); border-color: #2a5c40; }
 .fail { color: var(--bad); border-color: #5c2a28; }
@@ -169,3 +174,87 @@ button.primary {
 .pill.success { color: var(--accent); border-color: #2a5c40; }
 .pill.failed { color: var(--bad); border-color: #5c2a28; }
 .pill.partial { color: var(--warn); border-color: #5c4a2a; }
+
+/* ── 执行中任务卡片 ── */
+.running-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.run-card {
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+.run-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+.run-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.run-card-title .mono {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.run-card-node {
+  text-align: right;
+  font-size: 12px;
+  color: var(--muted);
+}
+.run-card-node b {
+  color: var(--ink);
+  font-weight: 500;
+}
+/* 进度条 */
+.progress-bar {
+  width: 100%;
+  height: 8px;
+  background: #0e1614;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 8px 0;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #4ade80);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+/* 进度详情 */
+.progress-meta {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.progress-meta .item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.progress-meta .label {
+  color: var(--muted);
+  font-size: 11px;
+}
+.progress-meta .value {
+  color: var(--ink);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.progress-meta .value.speed {
+  color: var(--accent);
+}
+.run-card-empty {
+  text-align: center;
+  padding: 30px;
+  color: var(--muted);
+  font-size: 13px;
+}

@@ -236,24 +236,26 @@ impl TorrentIndexDb {
         let conn = self.conn.lock().unwrap();
 
         // 优先使用 FTS5 全文搜索（K4 优化）
-        let fts_result = conn.prepare(
-            r#"
+        let fts_result = conn
+            .prepare(
+                r#"
             SELECT t.* FROM torrents t
             JOIN torrents_fts f ON f.rowid = t.rowid
             WHERE torrents_fts MATCH ?1
             ORDER BY bm25(torrents_fts), t.seeders DESC
             LIMIT ?2 OFFSET ?3
             "#,
-        ).and_then(|mut stmt| {
-            let rows = stmt.query_map(params![query, limit, offset], |row| {
-                Self::row_to_torrent(row)
-            })?;
-            let mut results = vec![];
-            for row in rows {
-                results.push(row?);
-            }
-            Ok(results)
-        });
+            )
+            .and_then(|mut stmt| {
+                let rows = stmt.query_map(params![query, limit, offset], |row| {
+                    Self::row_to_torrent(row)
+                })?;
+                let mut results = vec![];
+                for row in rows {
+                    results.push(row?);
+                }
+                Ok(results)
+            });
 
         match fts_result {
             Ok(results) if !results.is_empty() => Ok(results),
@@ -284,10 +286,9 @@ impl TorrentIndexDb {
     /// 获取热门种子（按 seeders 排序）
     pub fn get_top(&self, limit: i64) -> Result<Vec<TorrentIndex>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM torrents ORDER BY seeders DESC, last_updated DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit], |row| Self::row_to_torrent(row))?;
+        let mut stmt = conn
+            .prepare("SELECT * FROM torrents ORDER BY seeders DESC, last_updated DESC LIMIT ?1")?;
+        let rows = stmt.query_map(params![limit], Self::row_to_torrent)?;
         let mut results = vec![];
         for row in rows {
             results.push(row?);
@@ -298,10 +299,8 @@ impl TorrentIndexDb {
     /// 获取最新种子（按 first_seen 排序）
     pub fn get_recent(&self, limit: i64) -> Result<Vec<TorrentIndex>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM torrents ORDER BY first_seen DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit], |row| Self::row_to_torrent(row))?;
+        let mut stmt = conn.prepare("SELECT * FROM torrents ORDER BY first_seen DESC LIMIT ?1")?;
+        let rows = stmt.query_map(params![limit], Self::row_to_torrent)?;
         let mut results = vec![];
         for row in rows {
             results.push(row?);
@@ -337,7 +336,10 @@ impl TorrentIndexDb {
     pub fn insert_files(&self, infohash: &str, files: &[TorrentFile]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         // 先删除旧文件
-        conn.execute("DELETE FROM torrent_files WHERE infohash = ?1", params![infohash])?;
+        conn.execute(
+            "DELETE FROM torrent_files WHERE infohash = ?1",
+            params![infohash],
+        )?;
         for (idx, file) in files.iter().enumerate() {
             conn.execute(
                 "INSERT INTO torrent_files (infohash, file_index, path, length) VALUES (?1, ?2, ?3, ?4)",
@@ -371,7 +373,10 @@ impl TorrentIndexDb {
     /// 删除种子
     pub fn delete(&self, infohash: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM torrents WHERE infohash = ?1", params![infohash])?;
+        conn.execute(
+            "DELETE FROM torrents WHERE infohash = ?1",
+            params![infohash],
+        )?;
         Ok(())
     }
 
@@ -379,12 +384,20 @@ impl TorrentIndexDb {
     pub fn stats(&self) -> Result<IndexStats> {
         let conn = self.conn.lock().unwrap();
         let total: i64 = conn.query_row("SELECT COUNT(*) FROM torrents", [], |r| r.get(0))?;
-        let with_metadata: i64 = conn
-            .query_row("SELECT COUNT(*) FROM torrents WHERE metadata_complete = 1", [], |r| r.get(0))?;
-        let total_seeders: i64 = conn
-            .query_row("SELECT COALESCE(SUM(seeders), 0) FROM torrents", [], |r| r.get(0))?;
-        let total_size: i64 = conn
-            .query_row("SELECT COALESCE(SUM(total_length), 0) FROM torrents", [], |r| r.get(0))?;
+        let with_metadata: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM torrents WHERE metadata_complete = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        let total_seeders: i64 =
+            conn.query_row("SELECT COALESCE(SUM(seeders), 0) FROM torrents", [], |r| {
+                r.get(0)
+            })?;
+        let total_size: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(total_length), 0) FROM torrents",
+            [],
+            |r| r.get(0),
+        )?;
         Ok(IndexStats {
             total_torrents: total,
             with_metadata,
@@ -521,9 +534,12 @@ mod tests {
     #[test]
     fn test_search() {
         let db = TorrentIndexDb::open_memory().unwrap();
-        db.upsert(&make_test_torrent("aaa", "Ubuntu 22.04 ISO")).unwrap();
-        db.upsert(&make_test_torrent("bbb", "Fedora 38 Workstation")).unwrap();
-        db.upsert(&make_test_torrent("ccc", "Debian 12 DVD")).unwrap();
+        db.upsert(&make_test_torrent("aaa", "Ubuntu 22.04 ISO"))
+            .unwrap();
+        db.upsert(&make_test_torrent("bbb", "Fedora 38 Workstation"))
+            .unwrap();
+        db.upsert(&make_test_torrent("ccc", "Debian 12 DVD"))
+            .unwrap();
 
         let results = db.search("Ubuntu", 10, 0).unwrap();
         assert_eq!(results.len(), 1);
